@@ -11,8 +11,10 @@ a fitting's design space without touching Plant 3D at all.
 Endpoints:
     GET /                     viewer HTML
     GET /vendor/*, /viewer/*  static assets
-    GET /api/scripts          JSON list of discovered scripts
+    GET /api/scripts          JSON {root, scripts}
     GET /api/render?script=REL&params=JSON   -> {meta, glb_b64}
+    GET /api/browse?path=DIR  JSON {path, parent, entries: [{name, path, has_scripts}]}
+    POST /api/root {"path": DIR}   switch the watched root -> {root, scripts}
     GET /api/events           text/event-stream; fires when any script changes
 """
 
@@ -72,6 +74,25 @@ def _watch_change(previous, current):
         if previous[path] != current[path]:
             return os.path.relpath(path, ROOT).replace(os.sep, "/")
     return None
+
+
+def _dir_entries(path):
+    """Subdirectories of `path`, flagged with whether they'd work as a root
+    (i.e. contain customfittings/ or customsupports/ themselves)."""
+    entries = []
+    try:
+        names = sorted(os.listdir(path))
+    except OSError:
+        return entries
+    for name in names:
+        if name.startswith("."):
+            continue
+        full = os.path.join(path, name)
+        if not os.path.isdir(full):
+            continue
+        has_scripts = any(os.path.isdir(os.path.join(full, d)) for d in SCRIPT_DIRS)
+        entries.append({"name": name, "path": full, "has_scripts": has_scripts})
+    return entries
 
 
 def _safe_script_path(rel):
@@ -141,13 +162,57 @@ class Handler(BaseHTTPRequestHandler):
             ctype = "application/javascript" if full.endswith(".js") else "text/plain"
             self._send_file(full, ctype)
         elif path == "/api/scripts":
-            self._send(200, json.dumps({"scripts": discover_scripts()}))
+            self._send(200, json.dumps({"root": ROOT, "scripts": discover_scripts()}))
         elif path == "/api/render":
             self._handle_render(q)
+        elif path == "/api/browse":
+            self._handle_browse(q)
         elif path == "/api/events":
             self._handle_events()
         else:
             self._send(404, "not found", "text/plain")
+
+    def do_POST(self):
+        u = urllib.parse.urlparse(self.path)
+        if u.path == "/api/root":
+            self._handle_set_root()
+        else:
+            self._send(404, "not found", "text/plain")
+
+    def _read_json_body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        return json.loads(raw or b"{}")
+
+    def _handle_browse(self, q):
+        path = (q.get("path") or [""])[0] or ROOT
+        path = os.path.abspath(path)
+        if not os.path.isdir(path):
+            self._send(400, json.dumps({"error": "not a directory: %s" % path})); return
+        parent = os.path.dirname(path)
+        if parent == path:
+            parent = None
+        self._send(200, json.dumps({
+            "path": path,
+            "parent": parent,
+            "entries": _dir_entries(path),
+        }))
+
+    def _handle_set_root(self):
+        global ROOT
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError:
+            self._send(400, json.dumps({"error": "invalid JSON body"})); return
+        path = os.path.abspath(str(payload.get("path", "")))
+        if not os.path.isdir(path):
+            self._send(400, json.dumps({"error": "not a directory: %s" % path})); return
+        ROOT = path
+        with _watch_lock:
+            global _watch_version, _last_changed
+            _watch_version += 1
+            _last_changed = "__root__"
+        self._send(200, json.dumps({"root": ROOT, "scripts": discover_scripts()}))
 
     def _handle_render(self, q):
         rel = (q.get("script") or [""])[0]
