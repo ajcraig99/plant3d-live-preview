@@ -1,0 +1,8 @@
+# Core runtime for the Plant 3D live preview tool.
+manifold3d==3.5.2     # robust mesh CSG kernel (booleans)
+trimesh==4.12.2       # GLB/glTF export
+numpy==2.5.1
+scipy==1.18.0         # pulled in by trimesh's colour visuals
+
+# Optional: only needed to run shot.py (headless screenshots / self-tests).
+# playwright==1.61.0

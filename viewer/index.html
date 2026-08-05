@@ -1,0 +1,651 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Plant 3D Live Preview</title>
+<style>
+  :root {
+    --bg: #14171c; --panel: #1b1f26; --panel2: #22272f; --line: #2d333d;
+    --fg: #d7dde5; --muted: #8b95a3; --accent: #4aa3ff; --accent2: #ffb454;
+    --ok: #5ac37a; --warn: #e0a84a; --err: #ff6b6b; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 13px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; overflow: hidden; }
+  #app { display: grid; grid-template-columns: 260px 1fr 270px; height: 100vh; }
+
+  .col { min-width: 0; display: flex; flex-direction: column; height: 100vh; }
+  .col.left { border-right: 1px solid var(--line); background: var(--panel); }
+  .col.right { border-left: 1px solid var(--line); background: var(--panel); }
+  .hd { padding: 10px 12px; border-bottom: 1px solid var(--line); font-weight: 600;
+    letter-spacing: .3px; display: flex; align-items: center; gap: 8px; }
+  .hd .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .hd .dot.live { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .scroll { overflow-y: auto; flex: 1; }
+
+  .group-title { padding: 10px 12px 4px; color: var(--muted); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .6px; }
+  .item { padding: 6px 12px; cursor: pointer; color: var(--fg); font-family: var(--mono);
+    font-size: 12px; border-left: 2px solid transparent; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  .item:hover { background: var(--panel2); }
+  .item.sel { background: var(--panel2); border-left-color: var(--accent); color: #fff; }
+  .rootbar { padding: 9px 10px; border-bottom: 1px solid var(--line); background: rgba(15,18,22,.22); }
+  .rootrow { display: flex; align-items: center; gap: 7px; }
+  .rootlabel { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .55px; }
+  #rootpath, #browsepath { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-family: var(--mono); font-size: 11px; color: var(--fg); }
+  #rootpath { flex: 1; color: var(--muted); }
+  .btn.mini { padding: 3px 7px; font-size: 11px; border-radius: 5px; white-space: nowrap; }
+  #folderbrowser { border-bottom: 1px solid var(--line); background: #171b21; max-height: 300px;
+    display: flex; flex-direction: column; }
+  #folderbrowser[hidden] { display: none; }
+  .browse-head { padding: 8px 10px; display: grid; grid-template-columns: 1fr auto auto auto;
+    gap: 6px; align-items: center; border-bottom: 1px solid var(--line); }
+  .dirlist { overflow: auto; min-height: 70px; }
+  .diritem { padding: 6px 10px; display: flex; align-items: center; gap: 7px; cursor: pointer;
+    font-family: var(--mono); font-size: 12px; border-left: 2px solid transparent; }
+  .diritem:hover { background: var(--panel2); }
+  .diritem .mark { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex: 0 0 auto; }
+  .diritem.usable .mark { background: var(--ok); box-shadow: 0 0 6px rgba(90,195,122,.55); }
+  .diritem span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  #stage { position: relative; flex: 1; min-height: 0; background: radial-gradient(120% 120% at 50% 0%, #1c2128 0%, #0f1216 100%); }
+  #canvas { width: 100%; height: 100%; display: block; }
+  #toolbar { position: absolute; top: 10px; left: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn { background: rgba(30,35,42,.85); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 9px; font-size: 12px; cursor: pointer; backdrop-filter: blur(4px); }
+  .btn:hover { border-color: var(--accent); }
+  .btn.on { border-color: var(--accent); color: #fff; background: rgba(74,163,255,.18); }
+  #hud { position: absolute; bottom: 10px; left: 10px; font-family: var(--mono); font-size: 11px;
+    color: var(--muted); background: rgba(15,18,22,.7); padding: 6px 9px; border-radius: 6px;
+    border: 1px solid var(--line); pointer-events: none; }
+  #banner { position: absolute; top: 10px; right: 10px; left: 10px; margin-left: 220px;
+    background: rgba(255,107,107,.12); border: 1px solid var(--err); color: #ffd4d4;
+    padding: 8px 10px; border-radius: 6px; font-family: var(--mono); font-size: 11px;
+    white-space: pre-wrap; max-height: 40%; overflow: auto; display: none; }
+  #warns { position: absolute; bottom: 132px; right: 10px; max-width: 45%;
+    font-family: var(--mono); font-size: 11px; color: var(--warn);
+    background: rgba(224,168,74,.10); border: 1px solid var(--warn); border-radius: 6px;
+    padding: 6px 9px; display: none; }
+
+  /* param panel */
+  .prow { padding: 8px 12px; border-bottom: 1px solid var(--panel2); }
+  .prow .lbl { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .prow .name { font-family: var(--mono); font-size: 12px; color: var(--fg); }
+  .prow .name .code { color: var(--accent2); }
+  .prow .tt { color: var(--muted); font-size: 10px; }
+  .prow .controls { display: flex; gap: 8px; align-items: center; margin-top: 5px; }
+  .prow input[type=range] { flex: 1; accent-color: var(--accent); }
+  .prow input[type=number] { width: 74px; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; font-family: var(--mono); font-size: 12px; }
+  .meta-line { padding: 8px 12px; color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--panel2); }
+  .meta-line b { color: var(--fg); font-weight: 600; }
+  .foot { padding: 8px 12px; color: var(--muted); font-size: 10px; }
+  .empty { padding: 20px 12px; color: var(--muted); }
+</style>
+
+<div id="app">
+  <div class="col left">
+    <div class="hd"><span class="dot" id="livedot"></span> Scripts</div>
+    <div class="rootbar">
+      <div class="rootlabel">Root</div>
+      <div class="rootrow">
+        <div id="rootpath">—</div>
+        <button class="btn mini" id="btnBrowse">Browse</button>
+      </div>
+    </div>
+    <div id="folderbrowser" hidden>
+      <div class="browse-head">
+        <div id="browsepath">—</div>
+        <button class="btn mini" id="btnUp">Up</button>
+        <button class="btn mini" id="btnUseFolder">Use</button>
+        <button class="btn mini" id="btnCloseBrowser">Close</button>
+      </div>
+      <div class="dirlist" id="dirlist"><div class="empty">loading…</div></div>
+    </div>
+    <div class="scroll" id="scriptlist"><div class="empty">loading…</div></div>
+    <div class="foot">edit a .py &amp; save → auto-refresh</div>
+  </div>
+
+  <div class="col">
+    <div id="stage">
+      <canvas id="canvas"></canvas>
+      <div id="toolbar">
+        <button class="btn" id="btnFrame">Frame</button>
+        <button class="btn" id="btnReset">Reset params</button>
+        <button class="btn on" id="btnGrid">Grid</button>
+        <button class="btn on" id="btnPorts">Ports</button>
+        <button class="btn on" id="btnDims">Dims</button>
+        <button class="btn" id="btnFixedDims">Fixed dims</button>
+        <button class="btn" id="btnWire">Wireframe</button>
+        <button class="btn" id="btnSpin">Spin</button>
+      </div>
+      <div id="banner"></div>
+      <div id="warns"></div>
+      <div id="hud">—</div>
+    </div>
+  </div>
+
+  <div class="col right">
+    <div class="hd">Parameters</div>
+    <div class="scroll" id="params"><div class="empty">select a script</div></div>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "./vendor/three.module.js",
+  "three/addons/": "./vendor/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
+
+// ---- three.js scaffolding -------------------------------------------------
+const canvas = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.autoClear = false;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100000);
+camera.position.set(220, 180, 260);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight(0xbfd3ff, 0x28303a, 1.15));
+const key = new THREE.DirectionalLight(0xffffff, 2.0); key.position.set(1, 2, 1.5); scene.add(key);
+const fill = new THREE.DirectionalLight(0xffffff, 0.7); fill.position.set(-1.5, -0.5, -1); scene.add(fill);
+
+let grid = new THREE.GridHelper(400, 20, 0x3a4350, 0x252b33);
+scene.add(grid);
+const axes = new THREE.AxesHelper(60); scene.add(axes);
+const ucsScene = new THREE.Scene();
+const ucsCamera = new THREE.PerspectiveCamera(35, 1, 0.1, 20);
+ucsCamera.position.set(0, 0, 5);
+ucsCamera.lookAt(0, 0, 0);
+const ucsGroup = new THREE.Group();
+ucsScene.add(ucsGroup);
+addUcsAxis(new THREE.Vector3(1, 0, 0), 0xff5d5d, 'X');
+addUcsAxis(new THREE.Vector3(0, 1, 0), 0x65d982, 'Y');
+addUcsAxis(new THREE.Vector3(0, 0, 1), 0x5da7ff, 'Z');
+
+const modelGroup = new THREE.Group(); scene.add(modelGroup);   // GLB (already Y-up)
+const overlay = new THREE.Group(); scene.add(overlay);          // ports + dims
+
+const loader = new GLTFLoader();
+const CREASE_ANGLE = THREE.MathUtils.degToRad(30);
+
+// Plant is Z-up; GLB was exported rotated -90° about X → Y-up. Map raw Plant
+// coords the same way for overlays: (x, y, z) → (x, z, -y).
+const P = (p) => new THREE.Vector3(p[0], p[2], -p[1]);
+
+let spin = false, showPorts = true, showDims = true, showFixedDims = false, wire = false;
+let modelRadius = 100;
+
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== w || canvas.height !== h) {
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h; camera.updateProjectionMatrix();
+  }
+}
+function tick() {
+  resize();
+  if (spin) modelGroup.rotation.y += 0.005;
+  controls.update();
+  renderer.setViewport(0, 0, canvas.clientWidth, canvas.clientHeight);
+  renderer.setScissorTest(false);
+  renderer.clear();
+  renderer.render(scene, camera);
+  renderUcsInset();
+  requestAnimationFrame(tick);
+}
+tick();
+
+// ---- overlay drawing ------------------------------------------------------
+function makeUcsLabel(text, color) {
+  const pad = 10, fs = 52;
+  const c = document.createElement('canvas'); const ctx = c.getContext('2d');
+  ctx.font = `700 ${fs}px ui-monospace, monospace`;
+  const w = ctx.measureText(text).width;
+  c.width = w + pad * 2; c.height = fs + pad * 2;
+  ctx.font = `700 ${fs}px ui-monospace, monospace`;
+  ctx.fillStyle = 'rgba(15,18,22,0.72)'; ctx.fillRect(0, 0, c.width, c.height);
+  ctx.fillStyle = color; ctx.textBaseline = 'middle';
+  ctx.fillText(text, pad, c.height / 2);
+  const tex = new THREE.CanvasTexture(c);
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  const s = 0.32 / c.height;
+  spr.scale.set(c.width * s, c.height * s, 1);
+  spr.renderOrder = 1000;
+  return spr;
+}
+
+function addUcsAxis(dir, color, label) {
+  const arrow = new THREE.ArrowHelper(dir, new THREE.Vector3(0, 0, 0), 1.12, color, 0.24, 0.14);
+  ucsGroup.add(arrow);
+  const spr = makeUcsLabel(label, '#' + color.toString(16).padStart(6, '0'));
+  spr.position.copy(dir.clone().multiplyScalar(1.38));
+  ucsGroup.add(spr);
+}
+
+function renderUcsInset() {
+  const size = Math.max(144, Math.min(208, Math.floor(Math.min(canvas.clientWidth, canvas.clientHeight) * 0.36)));
+  const pad = 20;
+  ucsGroup.quaternion.copy(camera.quaternion).invert();
+  renderer.clearDepth();
+  renderer.setScissorTest(true);
+  renderer.setScissor(canvas.clientWidth - size - pad, pad, size, size);
+  renderer.setViewport(canvas.clientWidth - size - pad, pad, size, size);
+  renderer.render(ucsScene, ucsCamera);
+  renderer.setScissorTest(false);
+}
+
+function disposeMaterial(mat) {
+  if (Array.isArray(mat)) mat.forEach(m => m?.dispose?.());
+  else mat?.dispose?.();
+}
+function disposeObject(o) {
+  o.traverse?.(n => {
+    n.geometry?.dispose?.();
+    disposeMaterial(n.material);
+  });
+}
+function clearGroup(g) {
+  while (g.children.length) {
+    const c = g.children.pop();
+    disposeObject(c);
+  }
+}
+
+function makeLabel(text, color) {
+  const pad = 6, fs = 30;
+  const c = document.createElement('canvas'); const ctx = c.getContext('2d');
+  ctx.font = `${fs}px ui-monospace, monospace`;
+  const w = ctx.measureText(text).width;
+  c.width = w + pad * 2; c.height = fs + pad * 2;
+  ctx.font = `${fs}px ui-monospace, monospace`;
+  ctx.fillStyle = 'rgba(15,18,22,0.85)'; ctx.fillRect(0, 0, c.width, c.height);
+  ctx.strokeStyle = color; ctx.strokeRect(0.5, 0.5, c.width - 1, c.height - 1);
+  ctx.fillStyle = color; ctx.textBaseline = 'middle';
+  ctx.fillText(text, pad, c.height / 2);
+  const tex = new THREE.CanvasTexture(c); tex.anisotropy = 4;
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  // Target label height ≈ 8% of the model radius, independent of text length.
+  const worldH = modelRadius * 0.08;
+  const s = worldH / c.height;
+  spr.scale.set(c.width * s, c.height * s, 1);
+  spr.renderOrder = 999;
+  return spr;
+}
+
+function drawDimLine(dm, color, labelColor, withPrimitiveName = false) {
+  const a = P(dm.a), b = P(dm.b);
+  const len = a.distanceTo(b);
+  if (len < 1e-6) return;
+  const g = new THREE.BufferGeometry().setFromPoints([a, b]);
+  const mat = new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.95 });
+  const line = new THREE.Line(g, mat);
+  line.renderOrder = 998;
+  overlay.add(line);
+  [a, b].forEach(pp => {
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(modelRadius * 0.01, 10, 10),
+      new THREE.MeshBasicMaterial({ color, depthTest: false })
+    );
+    m.position.copy(pp); m.renderOrder = 998; overlay.add(m);
+  });
+  const name = withPrimitiveName && dm.primitive ? `${dm.primitive}.${dm.name}` : dm.name;
+  const lbl = makeLabel(`${name}=${len.toFixed(1)}`, labelColor);
+  lbl.position.copy(a.clone().add(b).multiplyScalar(0.5));
+  overlay.add(lbl);
+}
+
+function drawOverlays(meta) {
+  clearGroup(overlay);
+  const arrowLen = modelRadius * 0.5;
+  if (showPorts && meta.ports) {
+    meta.ports.forEach((pt, i) => {
+      const pos = P(pt.pos);
+      const dir = P(pt.dir).normalize();
+      const ah = new THREE.ArrowHelper(dir, pos, arrowLen, 0x4aa3ff, arrowLen * 0.28, arrowLen * 0.18);
+      overlay.add(ah);
+      const dot = new THREE.Mesh(new THREE.SphereGeometry(modelRadius * 0.02, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0x4aa3ff }));
+      dot.position.copy(pos); overlay.add(dot);
+      const lbl = makeLabel('P' + (i + 1), '#8fd0ff'); lbl.position.copy(pos.clone().addScaledVector(dir, arrowLen + modelRadius * 0.05)); overlay.add(lbl);
+    });
+  }
+  if (showDims && meta.dims) {
+    meta.dims.forEach(dm => drawDimLine(dm, 0xffb454, '#ffcf8a'));
+  }
+  if (showFixedDims && meta.primitive_dims) {
+    meta.primitive_dims.forEach(dm => drawDimLine(dm, 0x65d982, '#a8f0bd', true));
+  }
+}
+
+function frameModel(bounds) {
+  const box = new THREE.Box3();
+  if (bounds) box.set(new THREE.Vector3(...bounds.min), new THREE.Vector3(...bounds.max));
+  else box.setFromObject(modelGroup);
+  if (box.isEmpty()) return;
+  const size = new THREE.Vector3(); box.getSize(size);
+  const center = new THREE.Vector3(); box.getCenter(center);
+  modelRadius = Math.max(size.length() / 2, 10);
+  controls.target.copy(center);
+  const d = modelRadius * 2.6;
+  camera.position.copy(center).add(new THREE.Vector3(0.8, 0.6, 1).normalize().multiplyScalar(d));
+  camera.near = modelRadius / 100; camera.far = modelRadius * 100; camera.updateProjectionMatrix();
+  // resize grid to model
+  scene.remove(grid);
+  const gs = Math.pow(10, Math.ceil(Math.log10(modelRadius * 2)));
+  grid = new THREE.GridHelper(gs * 2, 20, 0x3a4350, 0x252b33); grid.visible = document.getElementById('btnGrid').classList.contains('on');
+  scene.add(grid);
+  axes.scale.setScalar(modelRadius / 60);
+}
+
+// ---- data flow ------------------------------------------------------------
+let currentScript = null;
+let currentRoot = '';
+let browsePath = '';
+let currentValues = {};   // effective values reported by the last render (display)
+let userValues = {};      // ONLY params the user explicitly overrode (sent to server)
+let debounceTimer = null;
+
+async function api(path, options) {
+  const r = await fetch(path, options);
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || r.statusText);
+  return data;
+}
+
+async function postApi(path, payload) {
+  return api(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+function b64ToBuf(b64) {
+  const bin = atob(b64); const len = bin.length; const buf = new Uint8Array(len);
+  for (let i = 0; i < len; i++) buf[i] = bin.charCodeAt(i);
+  return buf.buffer;
+}
+
+function applyMaterials() {
+  modelGroup.traverse(o => {
+    if (o.isMesh) {
+      if (!o.userData.creasedNormals) {
+        const old = o.geometry;
+        o.geometry = toCreasedNormals(old, CREASE_ANGLE);
+        old.dispose();
+        o.userData.creasedNormals = true;
+      }
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach(mat => {
+        mat.metalness = 0.2; mat.roughness = 0.76;
+        mat.side = THREE.DoubleSide;   // tolerate any inverted windings
+        mat.flatShading = false; mat.wireframe = wire;
+        mat.needsUpdate = true;
+      });
+      if (!o.userData.edgeLines) {
+        const edges = new THREE.LineSegments(
+          new THREE.EdgesGeometry(o.geometry, 25),
+          new THREE.LineBasicMaterial({
+            color: 0x111820,
+            transparent: true,
+            opacity: 0.72,
+            depthTest: true
+          })
+        );
+        edges.renderOrder = 2;
+        o.add(edges);
+        o.userData.edgeLines = edges;
+      }
+      o.userData.edgeLines.visible = !wire;
+    }
+  });
+}
+
+async function render({ rebuildPanel = false, frame = false } = {}) {
+  if (!currentScript) return;
+  // Always send only explicit overrides so untouched params follow the file's
+  // current defaults (important for live-reload after editing a default).
+  const url = `/api/render?script=${encodeURIComponent(currentScript)}&params=${encodeURIComponent(JSON.stringify(userValues))}`;
+  let data;
+  try {
+    data = await api(url);
+  } catch (err) {
+    const banner = document.getElementById('banner');
+    banner.style.display = 'block';
+    banner.textContent = String(err.message || err);
+    return;
+  }
+  const banner = document.getElementById('banner');
+  if (data.error) {
+    banner.style.display = 'block';
+    banner.textContent = `⚠ ${currentScript}\n${data.error}`;
+    return;
+  }
+  banner.style.display = 'none';
+  const meta = data.meta;
+
+  // geometry
+  clearGroup(modelGroup); modelGroup.rotation.y = 0;
+  if (data.glb_b64) {
+    loader.parse(b64ToBuf(data.glb_b64), '', (gltf) => {
+      modelGroup.add(gltf.scene);
+      applyMaterials();
+      if (frame) frameModel(meta.bounds);
+      drawOverlays(meta);
+    }, (err) => {
+      document.getElementById('banner').style.display = 'block';
+      document.getElementById('banner').textContent = 'GLB load error: ' + err;
+    });
+  } else {
+    drawOverlays(meta);
+  }
+
+  // hud
+  const unit = (meta.activate && meta.activate.LengthUnit) || 'mm';
+  document.getElementById('hud').textContent =
+    `${meta.entry}()  ·  ${meta.solid_count} solid(s)  ·  ${meta.ports.length} port(s)  ·  ${unit}`;
+
+  // warnings
+  const warns = document.getElementById('warns');
+  if (meta.warnings && meta.warnings.length) {
+    warns.style.display = 'block';
+    warns.textContent = '⚠ ' + meta.warnings.join('\n⚠ ');
+  } else warns.style.display = 'none';
+
+  if (rebuildPanel) buildPanel(meta);
+  return meta;
+}
+
+function scheduleRender() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => render(), 120);
+}
+
+function buildPanel(meta) {
+  const panel = document.getElementById('params');
+  panel.innerHTML = '';
+  const grp = (meta.activate && meta.activate.Group) || '—';
+  const tip = (meta.activate && meta.activate.TooltipLong) || '';
+  const info = document.createElement('div'); info.className = 'meta-line';
+  info.innerHTML = `<b>${meta.activate.TooltipShort || meta.entry}</b> · group “${grp}”` + (tip ? `<br><span style="color:var(--muted)">${tip}</span>` : '');
+  panel.appendChild(info);
+
+  currentValues = Object.assign({}, meta.values);
+
+  meta.params.forEach(p => {
+    // effective value: user override if present, otherwise the file's default
+    const v = (p.name in userValues) ? userValues[p.name] : p.default;
+    currentValues[p.name] = v;
+    const row = document.createElement('div'); row.className = 'prow';
+    const isInt = p.type === 'INT' || p.type === 'INTEGER';
+    const step = isInt ? 1 : 'any';
+    const sliderMax = Math.max(Math.abs(v) * 3, Math.abs(v) + 50, 10);
+    const sliderMin = p.allow_negative ? -sliderMax : 0;
+    row.innerHTML = `
+      <div class="lbl">
+        <span class="name"><span class="code">${p.name}</span> ${p.short && p.short !== p.name ? '· ' + p.short : ''}</span>
+        <span class="tt">${p.type}</span>
+      </div>
+      <div class="controls">
+        <input type="range" min="${sliderMin}" max="${sliderMax}" step="${isInt ? 1 : sliderMax / 200}" value="${v}">
+        <input type="number" step="${step}" value="${v}">
+      </div>
+      ${p.long ? `<div class="tt" style="margin-top:4px">${p.long}</div>` : ''}`;
+    const [range, num] = row.querySelectorAll('input');
+    const set = (val, from) => {
+      let f = parseFloat(val); if (isNaN(f)) return;
+      if (isInt) f = Math.round(f);
+      currentValues[p.name] = f;
+      userValues[p.name] = f;
+      if (from !== 'range') { if (f > +range.max) range.max = f; if (f < +range.min) range.min = f; range.value = f; }
+      if (from !== 'num') num.value = f;
+      scheduleRender();
+    };
+    range.addEventListener('input', () => set(range.value, 'range'));
+    num.addEventListener('input', () => set(num.value, 'num'));
+    panel.appendChild(row);
+  });
+}
+
+async function loadScript(rel) {
+  currentScript = rel;
+  currentValues = {};
+  userValues = {};   // fresh script: start from its own defaults
+  document.querySelectorAll('.item').forEach(el => el.classList.toggle('sel', el.dataset.path === rel));
+  await render({ rebuildPanel: true, frame: true });
+}
+
+async function loadList({ preferCurrent = false } = {}) {
+  const { root, scripts } = await api('/api/scripts');
+  currentRoot = root || '';
+  document.getElementById('rootpath').textContent = currentRoot || '—';
+  const list = document.getElementById('scriptlist'); list.innerHTML = '';
+  if (!scripts.length) {
+    currentScript = null;
+    clearGroup(modelGroup); clearGroup(overlay);
+    document.getElementById('params').innerHTML = '<div class="empty">no scripts found</div>';
+    document.getElementById('hud').textContent = '—';
+    list.innerHTML = '<div class="empty">no scripts found</div>';
+    return;
+  }
+  const byDir = {};
+  scripts.forEach(s => { const [d, f] = s.split('/'); (byDir[d] = byDir[d] || []).push({ f, path: s }); });
+  Object.keys(byDir).sort().forEach(d => {
+    const t = document.createElement('div'); t.className = 'group-title'; t.textContent = d; list.appendChild(t);
+    byDir[d].forEach(({ f, path }) => {
+      const el = document.createElement('div'); el.className = 'item'; el.textContent = f; el.dataset.path = path;
+      el.onclick = () => loadScript(path); list.appendChild(el);
+    });
+  });
+  const next = preferCurrent && scripts.includes(currentScript) ? currentScript : scripts[0];
+  if (next) loadScript(next);
+}
+loadList();
+
+function renderBrowser(data) {
+  browsePath = data.path;
+  document.getElementById('browsepath').textContent = browsePath;
+  const up = document.getElementById('btnUp');
+  up.disabled = !data.parent;
+  up.dataset.path = data.parent || '';
+  const dirs = document.getElementById('dirlist');
+  dirs.innerHTML = '';
+  if (!data.entries.length) {
+    dirs.innerHTML = '<div class="empty">no subfolders</div>';
+    return;
+  }
+  data.entries.forEach(entry => {
+    const row = document.createElement('div');
+    row.className = 'diritem' + (entry.has_scripts ? ' usable' : '');
+    row.dataset.path = entry.path;
+    const mark = document.createElement('span'); mark.className = 'mark';
+    const name = document.createElement('span'); name.textContent = entry.name;
+    row.appendChild(mark); row.appendChild(name);
+    row.addEventListener('click', () => browseFolder(entry.path));
+    dirs.appendChild(row);
+  });
+}
+
+function showDirMessage(text) {
+  const dirs = document.getElementById('dirlist');
+  dirs.innerHTML = '';
+  const msg = document.createElement('div');
+  msg.className = 'empty';
+  msg.textContent = text;
+  dirs.appendChild(msg);
+}
+
+async function browseFolder(path = currentRoot) {
+  const browser = document.getElementById('folderbrowser');
+  browser.hidden = false;
+  document.getElementById('dirlist').innerHTML = '<div class="empty">loading…</div>';
+  try {
+    renderBrowser(await api('/api/browse?path=' + encodeURIComponent(path || currentRoot)));
+  } catch (err) {
+    showDirMessage(String(err.message || err));
+  }
+}
+
+async function useBrowseFolder() {
+  if (!browsePath) return;
+  try {
+    await postApi('/api/root', { path: browsePath });
+    document.getElementById('folderbrowser').hidden = true;
+    currentScript = null;
+    currentValues = {};
+    userValues = {};
+    await loadList();
+  } catch (err) {
+    showDirMessage(String(err.message || err));
+  }
+}
+
+// ---- live reload via SSE --------------------------------------------------
+const dot = document.getElementById('livedot');
+function connectSSE() {
+  const es = new EventSource('/api/events');
+  es.onopen = () => dot.classList.add('live');
+  es.onerror = () => { dot.classList.remove('live'); };
+  es.onmessage = (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.changed === '__root__' || d.changed === '__scripts__') {
+        loadList({ preferCurrent: true });
+      } else if (d.changed && d.changed === currentScript) {
+        // re-render keeping the user's explicit overrides; untouched params
+        // follow the file's (possibly edited) defaults. Rebuild the panel in
+        // case the parameter set changed. Camera is left as-is.
+        render({ rebuildPanel: true });
+      }
+    } catch (_) {}
+  };
+}
+connectSSE();
+
+// ---- toolbar --------------------------------------------------------------
+const tb = (id, fn) => document.getElementById(id).addEventListener('click', fn);
+function toggle(el) { el.classList.toggle('on'); return el.classList.contains('on'); }
+tb('btnBrowse', () => browseFolder(currentRoot));
+tb('btnCloseBrowser', () => { document.getElementById('folderbrowser').hidden = true; });
+tb('btnUp', (e) => { if (e.target.dataset.path) browseFolder(e.target.dataset.path); });
+tb('btnUseFolder', () => useBrowseFolder());
+tb('btnFrame', () => frameModel(null));
+tb('btnReset', () => { userValues = {}; render({ rebuildPanel: true, frame: true }); });
+tb('btnGrid', (e) => { grid.visible = toggle(e.target); });
+tb('btnPorts', (e) => { showPorts = toggle(e.target); render(); });
+tb('btnDims', (e) => { showDims = toggle(e.target); render(); });
+tb('btnFixedDims', (e) => { showFixedDims = toggle(e.target); render(); });
+tb('btnWire', (e) => { wire = toggle(e.target); applyMaterials(); });
+tb('btnSpin', (e) => { spin = toggle(e.target); });
+addEventListener('resize', resize);
+</script>
