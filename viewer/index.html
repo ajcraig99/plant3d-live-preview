@@ -585,21 +585,43 @@ function showDirMessage(text) {
   dirs.appendChild(msg);
 }
 
+let browseRefreshTimer = null;
+
+function stopBrowseRefresh() {
+  if (browseRefreshTimer) { clearInterval(browseRefreshTimer); browseRefreshTimer = null; }
+}
+
+async function refreshBrowse(path) {
+  try {
+    renderBrowser(await api('/api/browse?path=' + encodeURIComponent(path)));
+  } catch (err) {
+    stopBrowseRefresh();
+    showDirMessage(String(err.message || err));
+  }
+}
+
 async function browseFolder(path = currentRoot) {
   const browser = document.getElementById('folderbrowser');
   browser.hidden = false;
   document.getElementById('dirlist').innerHTML = '<div class="empty">loading…</div>';
+  stopBrowseRefresh();
+  const target = path || currentRoot;
   try {
-    renderBrowser(await api('/api/browse?path=' + encodeURIComponent(path || currentRoot)));
+    renderBrowser(await api('/api/browse?path=' + encodeURIComponent(target)));
   } catch (err) {
     showDirMessage(String(err.message || err));
+    return;
   }
+  // Keep the listing live while the browser is open, so folders created or
+  // removed on disk (e.g. in Explorer) show up without navigating away.
+  browseRefreshTimer = setInterval(() => refreshBrowse(browsePath || target), 1000);
 }
 
 async function useBrowseFolder() {
   if (!browsePath) return;
   try {
     await postApi('/api/root', { path: browsePath });
+    stopBrowseRefresh();
     document.getElementById('folderbrowser').hidden = true;
     currentScript = null;
     currentValues = {};
@@ -636,7 +658,7 @@ connectSSE();
 const tb = (id, fn) => document.getElementById(id).addEventListener('click', fn);
 function toggle(el) { el.classList.toggle('on'); return el.classList.contains('on'); }
 tb('btnBrowse', () => browseFolder(currentRoot));
-tb('btnCloseBrowser', () => { document.getElementById('folderbrowser').hidden = true; });
+tb('btnCloseBrowser', () => { stopBrowseRefresh(); document.getElementById('folderbrowser').hidden = true; });
 tb('btnUp', (e) => { if (e.target.dataset.path) browseFolder(e.target.dataset.path); });
 tb('btnUseFolder', () => useBrowseFolder());
 tb('btnFrame', () => frameModel(null));
