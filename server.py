@@ -60,6 +60,12 @@ def _script_subdirs(root):
 def discover_scripts(root=None):
     root = root if root is not None else ROOT
     found = []
+    try:
+        for name in sorted(os.listdir(root)):
+            if name.endswith(".py"):
+                found.append(name)
+    except OSError:
+        pass
     for d in _script_subdirs(root):
         full = os.path.join(root, d)
         for name in sorted(os.listdir(full)):

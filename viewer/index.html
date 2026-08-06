@@ -539,9 +539,14 @@ async function loadList({ preferCurrent = false } = {}) {
     return;
   }
   const byDir = {};
-  scripts.forEach(s => { const [d, f] = s.split('/'); (byDir[d] = byDir[d] || []).push({ f, path: s }); });
+  scripts.forEach(s => {
+    const i = s.lastIndexOf('/');
+    const d = i === -1 ? '' : s.slice(0, i);
+    const f = i === -1 ? s : s.slice(i + 1);
+    (byDir[d] = byDir[d] || []).push({ f, path: s });
+  });
   Object.keys(byDir).sort().forEach(d => {
-    const t = document.createElement('div'); t.className = 'group-title'; t.textContent = d; list.appendChild(t);
+    const t = document.createElement('div'); t.className = 'group-title'; t.textContent = d || '(root)'; list.appendChild(t);
     byDir[d].forEach(({ f, path }) => {
       const el = document.createElement('div'); el.className = 'item'; el.textContent = f; el.dataset.path = path;
       el.onclick = () => loadScript(path); list.appendChild(el);
