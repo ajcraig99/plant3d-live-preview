@@ -36,18 +36,32 @@ import render as R  # noqa: E402
 # Config / state
 # ---------------------------------------------------------------------------
 ROOT = os.path.abspath(os.path.join(_HERE, ".."))     # repo root by default
-SCRIPT_DIRS = ["customfittings", "customsupports"]
+_SKIP_DIRS = {"__pycache__", ".venv", ".git"}
 _watch_version = 0
 _watch_lock = threading.Lock()
 _last_changed = ""
 
 
-def discover_scripts():
+def _script_subdirs(root):
+    """Immediate subdirectories of `root` worth scanning for scripts. Any
+    folder with .py files in it counts -- not just customfittings/
+    customsupports -- so ad-hoc folders (e.g. an "examples" dir) work too."""
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    return [
+        n for n in names
+        if n not in _SKIP_DIRS and not n.startswith(".")
+        and os.path.isdir(os.path.join(root, n))
+    ]
+
+
+def discover_scripts(root=None):
+    root = root if root is not None else ROOT
     found = []
-    for d in SCRIPT_DIRS:
-        full = os.path.join(ROOT, d)
-        if not os.path.isdir(full):
-            continue
+    for d in _script_subdirs(root):
+        full = os.path.join(root, d)
         for name in sorted(os.listdir(full)):
             if name.endswith(".py"):
                 found.append(d + "/" + name)
@@ -90,7 +104,7 @@ def _dir_entries(path):
         full = os.path.join(path, name)
         if not os.path.isdir(full):
             continue
-        has_scripts = any(os.path.isdir(os.path.join(full, d)) for d in SCRIPT_DIRS)
+        has_scripts = bool(discover_scripts(full))
         entries.append({"name": name, "path": full, "has_scripts": has_scripts})
     return entries
 
@@ -276,7 +290,7 @@ def main(argv):
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     url = "http://%s:%d/" % (args.host, args.port)
     print("Plant 3D preview server running at", url)
-    print("Watching:", ", ".join(os.path.join(ROOT, d) for d in SCRIPT_DIRS))
+    print("Watching:", ROOT)
     print("Ctrl-C to stop.")
     if not args.no_open:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
