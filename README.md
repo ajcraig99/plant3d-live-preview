@@ -4,6 +4,8 @@ A browser-based live renderer for Plant 3D custom Python parts. Point it at a
 repo containing `customfittings/` and/or `customsupports/` directories, edit a
 `.py`, hit **save**, and the 3D model re-renders in the browser.
 
+![Plant 3D Live Preview demo](demo.gif)
+
 ## Usage
 
 ```bash
