@@ -159,6 +159,74 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(fine["meta"]["segments"], 96)
         self.assertLess(len(coarse["glb"]), len(fine["glb"]))
 
+    def test_primitive_dims_follow_translation(self):
+        result = render_temp_script(
+            "dimbox",
+            """
+            from varmain.primitiv import *
+            from varmain.custom import *
+
+            @activate(Group="Test", LengthUnit="mm")
+            def {stem}(s, **kw):
+                BOX(s, L=20.0, W=10.0, H=6.0).translate((30.0, -20.0, 40.0))
+            """,
+        )
+        dims = {d["name"]: d for d in result["meta"]["primitive_dims"]}
+        self.assertEqual(set(dims), {"L", "W", "H"})
+        self.assertEqual(dims["H"]["primitive"], "BOX")
+        # corner of the box after translation: (30-3, -20-10, 40-5)
+        self.assertEqual(tuple(dims["H"]["a"]), (27.0, -30.0, 35.0))
+        self.assertEqual(tuple(dims["H"]["b"]), (33.0, -30.0, 35.0))
+        self.assertEqual(tuple(dims["L"]["b"]), (27.0, -10.0, 35.0))
+        self.assertEqual(tuple(dims["W"]["b"]), (27.0, -30.0, 45.0))
+
+    def test_primitive_dims_follow_rotation_and_drop_consumed_operands(self):
+        result = render_temp_script(
+            "dimrot",
+            """
+            from varmain.primitiv import *
+            from varmain.custom import *
+
+            @activate(Group="Test", LengthUnit="mm")
+            def {stem}(s, **kw):
+                main = BOX(s, L=20.0, W=10.0, H=6.0).rotateZ(90)
+                cutter = CYLINDER(s, R=2.0, H=30.0).translate((0.0, 0.0, -15.0))
+                main.subtractFrom(cutter)
+                cutter.erase()
+            """,
+        )
+        dims = {d["name"]: d for d in result["meta"]["primitive_dims"]}
+        self.assertEqual(set(dims), {"L", "W", "H"})   # cutter's R/H are gone
+        a, b = dims["H"]["a"], dims["H"]["b"]
+        # corner (-3,-10,-5) rotated 90 about Z -> (10,-3,-5); end (3,-10,-5) -> (10,3,-5)
+        for got, want in zip(a, (10.0, -3.0, -5.0)):
+            self.assertAlmostEqual(got, want, places=9)
+        for got, want in zip(b, (10.0, 3.0, -5.0)):
+            self.assertAlmostEqual(got, want, places=9)
+
+    def test_round_primitives_record_radius_and_height_dims(self):
+        result = render_temp_script(
+            "dimround",
+            """
+            from varmain.primitiv import *
+            from varmain.custom import *
+
+            @activate(Group="Test", LengthUnit="mm")
+            def {stem}(s, **kw):
+                CYLINDER(s, R=10.0, H=20.0, O=4.0)
+                CONE(s, R1=10.0, R2=5.0, H=8.0).translate((50.0, 0.0, 0.0))
+                TORUS(s, R1=30.0, R2=3.0).translate((100.0, 0.0, 0.0))
+                SPHERE(s, R=7.0).translate((150.0, 0.0, 0.0))
+            """,
+        )
+        names = sorted((d["primitive"], d["name"]) for d in result["meta"]["primitive_dims"])
+        self.assertEqual(names, [
+            ("CONE", "H"), ("CONE", "R1"), ("CONE", "R2"),
+            ("CYLINDER", "H"), ("CYLINDER", "O"), ("CYLINDER", "R"),
+            ("SPHERE", "R"),
+            ("TORUS", "R1"), ("TORUS", "R2"),
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()

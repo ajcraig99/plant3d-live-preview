@@ -53,6 +53,6 @@ def __getattr__(name):
                         hint = max(hint, float(kw[k]))
                     except (TypeError, ValueError):
                         pass
-            return Solid(s, Manifold.cube([hint, hint, hint], True))
+            return Solid(s, Manifold.cube([hint, hint, hint], True), primitive=name)
         return _placeholder
     raise AttributeError("module 'varmain.primitiv' has no attribute %r" % name)

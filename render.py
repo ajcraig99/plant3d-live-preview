@@ -195,6 +195,7 @@ def render_script(path, params=None, segments=None):
         "values": values,
         "ports": s.points,
         "dims": s.dims,
+        "primitive_dims": s.primitive_dims(),
         "warnings": s.warnings,
         "solid_count": len(live),
         "bounds": bounds,
