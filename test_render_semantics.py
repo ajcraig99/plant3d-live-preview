@@ -96,16 +96,17 @@ class RenderSemanticsTest(unittest.TestCase):
 
     def test_rectangular_supports_use_plant_box_axes(self):
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        for rel in (
+        candidates = (
             "customsupports/supportpost.py",
             "customsupports/supportaframe.py",
             "customsupports/teepost.py",
-        ):
-            script_path = os.path.join(repo_root, rel)
-            if not os.path.exists(script_path):
-                continue
+        )
+        present = [rel for rel in candidates if os.path.exists(os.path.join(repo_root, rel))]
+        if not present:
+            self.skipTest("no Plant 3D repo scripts found next to this checkout")
+        for rel in present:
             with self.subTest(script=rel):
-                result = render_script(script_path)
+                result = render_script(os.path.join(repo_root, rel))
                 meta = result["meta"]
 
                 self.assertEqual(meta["solid_count"], 1)
