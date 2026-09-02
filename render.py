@@ -15,6 +15,8 @@ import sys
 import json
 import time
 import inspect
+import tempfile
+import threading
 import importlib.util
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -22,16 +24,31 @@ _SHIM = os.path.join(_HERE, "shim")
 if _SHIM not in sys.path:
     sys.path.insert(0, _SHIM)
 
-# This is a live-reload tool: scripts and their helpers are re-read on every
-# render, sometimes faster than a filesystem mtime can distinguish (CPython's
-# .pyc staleness check truncates to whole seconds). A stale .pyc would then
-# silently keep serving an edited-away version of a helper. Never cache.
-sys.dont_write_bytecode = True
-
 import numpy as np                      # noqa: E402
 import trimesh                          # noqa: E402
 from manifold3d import Manifold         # noqa: E402
 from p3dkernel import Scene             # noqa: E402
+
+# This is a live-reload tool: scripts and their helpers are re-read on every
+# render, sometimes faster than a filesystem mtime can distinguish (CPython's
+# .pyc staleness check truncates to whole seconds), and a stale .pyc left in the
+# user's folder by an earlier run would silently serve an edited-away helper.
+# So: never write bytecode, and point bytecode *reads* at a private empty tree
+# so an existing __pycache__ next to the scripts is never consulted. This is
+# set after the heavy imports above so numpy/trimesh still load from their own
+# cached bytecode.
+sys.dont_write_bytecode = True
+sys.pycache_prefix = os.path.join(tempfile.gettempdir(), "p3dpreview-nocache")
+
+# sys.path as it stands before any script folder is added. Modules that live
+# under one of these entries (the tool itself, its shim, the stdlib,
+# site-packages) are never purged, whatever root the user points the tool at.
+_PROTECTED_DIRS = tuple({os.path.abspath(p) for p in sys.path if p} | {_HERE, _SHIM})
+
+# Renders share sys.modules and sys.path while loading a script and its
+# helpers, so they are serialised. A render is ~0.1 s; the viewer never has
+# more than one useful request in flight anyway.
+_render_lock = threading.Lock()
 
 # Steel-ish palette; index 0 is the "main" body, extras get distinct shades so
 # separate solids (guide plates, linestop bars, ...) are visually separable.
@@ -49,16 +66,28 @@ class RenderError(Exception):
     pass
 
 
+def _is_under(path, directory):
+    try:
+        return os.path.commonpath([path, directory]) == directory
+    except ValueError:  # different drives on Windows
+        return False
+
+
 def _purge_modules_from(directory):
-    """Drop cached modules whose source lives in `directory`, so that a helper
-    module edited between renders is re-imported. The tool's own directories
-    are never purged."""
-    if directory in (_HERE, _SHIM):
-        return
+    """Drop cached modules whose source lives anywhere under `directory`
+    (helper modules and helper packages), so that a helper edited between
+    renders is re-imported. Anything importable from the interpreter's own
+    search path is left alone, so pointing the root at a folder that happens
+    to contain the tool or site-packages can never unload those."""
     for name, mod in list(sys.modules.items()):
         f = getattr(mod, "__file__", None)
-        if f and os.path.dirname(os.path.abspath(f)) == directory:
-            del sys.modules[name]
+        if not f:
+            continue
+        f = os.path.abspath(f)
+        if any(_is_under(f, p) for p in _PROTECTED_DIRS):
+            continue
+        if _is_under(f, directory):
+            sys.modules.pop(name, None)
 
 
 def _load_entry(path):
@@ -150,7 +179,13 @@ def render_script(path, params=None, segments=None):
         meta  : dict (params schema, values used, ports, dims, warnings, bounds)
     `segments` overrides the facet count for round primitives (default from
     P3D_SEGMENTS env, else 96).
-    Raises RenderError on load/exec failure (message is user-facing)."""
+    Raises RenderError on load/exec failure (message is user-facing).
+    Thread-safe: concurrent callers are serialised (see _render_lock)."""
+    with _render_lock:
+        return _render_script_unlocked(path, params, segments)
+
+
+def _render_script_unlocked(path, params=None, segments=None):
     mod, fn = _load_entry(path)
     schema = describe_params(fn)
     values = {p["name"]: p["default"] for p in schema}

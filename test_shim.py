@@ -252,6 +252,102 @@ class ShimTests(unittest.TestCase):
             with open(meta_path) as f:
                 self.assertEqual(json.load(f)["values"]["D"], 40.0)
 
+    HELPER_USER = """
+        from varmain.primitiv import *
+        from varmain.custom import *
+        from {helper} import SIZE
+
+        @activate(Group="Test", LengthUnit="mm")
+        def {stem}(s, **kw):
+            BOX(s, L=SIZE, W=10.0, H=6.0)
+        """
+
+    def _write_helper(self, path, size):
+        with open(path, "w") as f:
+            f.write("SIZE = %s\n" % size)
+
+    def _box_length(self, meta):
+        # BOX L runs along Plant Y, which the exporter maps to viewer -Z.
+        b = meta["bounds"]
+        return b["max"][2] - b["min"][2]
+
+    def test_stale_pyc_next_to_helper_is_never_used(self):
+        import py_compile
+        import tempfile
+        from testutil import write_script
+        from render import render_script
+        with tempfile.TemporaryDirectory() as td:
+            helper = os.path.join(td, "helper_cached.py")
+            self._write_helper(helper, "20.0")
+            # An earlier tool run (or any Python) left bytecode beside the helper.
+            py_compile.compile(helper, cfile=os.path.join(td, "__pycache__", "helper_cached.cpython-%d%d.pyc"
+                                                          % sys.version_info[:2]), doraise=True)
+            path = write_script(td, "usecached", self.HELPER_USER.replace("{helper}", "helper_cached"))
+            self.assertAlmostEqual(self._box_length(render_script(path)["meta"]), 20.0, places=5)
+            # Same byte length, and force the same mtime the .pyc recorded, which
+            # is what a save within the same second looks like to CPython.
+            st = os.stat(helper)
+            self._write_helper(helper, "40.0")
+            os.utime(helper, (st.st_atime, st.st_mtime))
+            self.assertAlmostEqual(self._box_length(render_script(path)["meta"]), 40.0, places=5)
+
+    def test_helper_package_edits_are_picked_up(self):
+        import tempfile
+        from testutil import write_script
+        from render import render_script
+        with tempfile.TemporaryDirectory() as td:
+            pkg = os.path.join(td, "helpers_pkg")
+            os.makedirs(pkg)
+            self._write_helper(os.path.join(pkg, "__init__.py"), "20.0")
+            path = write_script(td, "usepkg", self.HELPER_USER.replace("{helper}", "helpers_pkg"))
+            self.assertAlmostEqual(self._box_length(render_script(path)["meta"]), 20.0, places=5)
+            self._write_helper(os.path.join(pkg, "__init__.py"), "40.0")
+            self.assertAlmostEqual(self._box_length(render_script(path)["meta"]), 40.0, places=5)
+
+    def test_concurrent_renders_of_a_script_with_helpers_do_not_fail(self):
+        import tempfile
+        import threading
+        from testutil import write_script
+        from render import render_script
+        with tempfile.TemporaryDirectory() as td:
+            self._write_helper(os.path.join(td, "helper_a.py"), "20.0")
+            self._write_helper(os.path.join(td, "helper_b.py"), "5.0")
+            path = write_script(td, "userace", """
+                from varmain.primitiv import *
+                from varmain.custom import *
+                from helper_a import SIZE
+                from helper_b import SIZE as W
+
+                @activate(Group="Test", LengthUnit="mm")
+                def {stem}(s, **kw):
+                    BOX(s, L=SIZE, W=W, H=6.0)
+                """)
+            errors = []
+
+            def worker():
+                for _ in range(15):
+                    try:
+                        render_script(path)
+                    except Exception as e:  # noqa: BLE001 - we want every failure kind
+                        errors.append(repr(e))
+            threads = [threading.Thread(target=worker) for _ in range(6)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=120)
+            self.assertEqual(errors, [])
+
+    def test_purge_never_unloads_tool_or_library_modules(self):
+        import render
+        import trimesh
+        import p3dkernel
+        before = {"render": sys.modules["render"], "trimesh": sys.modules["trimesh"],
+                  "p3dkernel": sys.modules["p3dkernel"]}
+        # A root that contains everything: the drive root on Windows, / elsewhere.
+        render._purge_modules_from(os.path.abspath(os.sep))
+        for name, mod in before.items():
+            self.assertIs(sys.modules.get(name), mod, "%s was purged" % name)
+
 
 if __name__ == "__main__":
     unittest.main()
