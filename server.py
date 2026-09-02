@@ -135,6 +135,22 @@ def _safe_script_path(rel):
     return full
 
 
+def _static_path(url_path):
+    """Map /vendor/... or /viewer/... to a file under that folder, or None if
+    the normalised path escapes it."""
+    parts = [p for p in url_path.split("/") if p]
+    if not parts:
+        return None
+    base = os.path.join(_HERE, parts[0])
+    full = os.path.normpath(os.path.join(_HERE, *parts))
+    try:
+        if os.path.commonpath([base, full]) != base:
+            return None
+    except ValueError:  # different drives on Windows
+        return None
+    return full
+
+
 def _watch_poll(mtimes):
     """One watcher iteration. Returns the new mtime map. Never raises: a bad
     poll (permission error, unplugged drive) must not kill live reload."""
@@ -197,9 +213,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/" or path == "/index.html":
             self._send_file(os.path.join(_HERE, "viewer", "index.html"), "text/html; charset=utf-8")
         elif path.startswith("/vendor/") or path.startswith("/viewer/"):
-            rel = path.lstrip("/")
-            full = os.path.abspath(os.path.join(_HERE, rel))
-            if not full.startswith(_HERE):
+            full = _static_path(path)
+            if full is None:
                 self._send(403, "forbidden", "text/plain"); return
             ctype = "application/javascript" if full.endswith(".js") else "text/plain"
             self._send_file(full, ctype)
@@ -222,9 +237,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "not found", "text/plain")
 
     def _read_json_body(self):
+        """Parse the JSON body. Raises ValueError (which JSONDecodeError
+        subclasses) when the body is not a JSON object."""
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
-        return json.loads(raw or b"{}")
+        payload = json.loads(raw or b"{}")
+        if not isinstance(payload, dict):
+            raise ValueError("JSON body must be an object")
+        return payload
 
     def _handle_browse(self, q):
         path = (q.get("path") or [""])[0] or ROOT
@@ -244,8 +264,8 @@ class Handler(BaseHTTPRequestHandler):
         global ROOT
         try:
             payload = self._read_json_body()
-        except json.JSONDecodeError:
-            self._send(400, json.dumps({"error": "invalid JSON body"})); return
+        except ValueError as e:
+            self._send(400, json.dumps({"error": "invalid JSON body: %s" % e})); return
         path = os.path.abspath(str(payload.get("path", "")))
         if not os.path.isdir(path):
             self._send(400, json.dumps({"error": "not a directory: %s" % path})); return
@@ -258,9 +278,11 @@ class Handler(BaseHTTPRequestHandler):
         params = {}
         if q.get("params"):
             try:
-                params = json.loads(q["params"][0])
+                parsed = json.loads(q["params"][0])
             except json.JSONDecodeError:
-                pass
+                parsed = None
+            if isinstance(parsed, dict):
+                params = parsed
         try:
             full = _safe_script_path(rel)
         except ValueError as e:
