@@ -2,20 +2,27 @@
 # p3dpreview - launch the Plant 3D live preview server.
 #
 # Creates/uses a local venv, installs deps on first run, then serves the viewer
-# and opens a browser. Edit any script in customfittings/ or customsupports/ and
-# save to see it re-render live.
+# and opens a browser. Edit any script under the chosen root and save to see it
+# re-render live.
 #
-#   ./p3dpreview --root /path/to/your/plant3d/repo
+#   ./p3dpreview --root /path/to/your/plant3d/scripts
 #   ./p3dpreview --port 9000 --no-open
+#
+# Works from Linux/macOS shells and from Git Bash on Windows. PowerShell users:
+# .\p3dpreview.ps1
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="$HERE/.venv"
-PY="$VENV/bin/python"
+
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) PY="$VENV/Scripts/python.exe"; SYSPY="python" ;;
+  *)                    PY="$VENV/bin/python";          SYSPY="python3" ;;
+esac
 
 if [ ! -x "$PY" ]; then
   echo "[p3dpreview] creating venv..."
-  python3 -m venv "$VENV"
+  "$SYSPY" -m venv "$VENV"
 fi
 
 # Install deps if the CAD kernel isn't importable yet.

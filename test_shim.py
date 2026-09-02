@@ -227,6 +227,31 @@ class ShimTests(unittest.TestCase):
             ("TORUS", "R1"), ("TORUS", "R2"),
         ])
 
+    def test_cli_writes_glb_and_meta_json_next_to_script(self):
+        import subprocess
+        import tempfile
+        from testutil import write_script
+        with tempfile.TemporaryDirectory() as td:
+            path = write_script(td, "clipart", """
+                from varmain.primitiv import *
+                from varmain.custom import *
+
+                @activate(Group="Test", LengthUnit="mm")
+                @param(D=LENGTH, TooltipShort="Diameter")
+                def {stem}(s, D=20.0, **kw):
+                    SPHERE(s, R=D / 2.0)
+                """)
+            here = os.path.dirname(os.path.abspath(__file__))
+            proc = subprocess.run([sys.executable, os.path.join(here, "render.py"), path, "-p", "D=40"],
+                                  capture_output=True, text=True, cwd=here)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertTrue(os.path.exists(os.path.join(td, "clipart.glb")))
+            meta_path = os.path.join(td, "clipart.meta.json")
+            self.assertTrue(os.path.exists(meta_path))
+            import json
+            with open(meta_path) as f:
+                self.assertEqual(json.load(f)["values"]["D"], 40.0)
+
 
 if __name__ == "__main__":
     unittest.main()

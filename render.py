@@ -5,7 +5,7 @@ ports and dimensions.
 
 Usable as a library (see render_script) or a CLI:
 
-    python render.py path/to/script.py                       # -> script.glb + script.json
+    python render.py path/to/script.py                       # -> script.glb + script.meta.json
     python render.py path/to/script.py -o out.glb
     python render.py path/to/script.py -p D=80 L=150
 """
@@ -239,9 +239,10 @@ def main(argv):
         with open(out, "wb") as f:
             f.write(result["glb"])
         print("wrote", out, "(%d bytes)" % len(result["glb"]))
-    with open(base + ".json", "w") as f:
+    meta_path = base + ".meta.json"
+    with open(meta_path, "w") as f:
         json.dump(result["meta"], f, indent=2)
-    print("wrote", base + ".json")
+    print("wrote", meta_path)
     for w in result["meta"]["warnings"]:
         print("  warn:", w)
 
