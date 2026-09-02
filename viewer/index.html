@@ -392,6 +392,22 @@ window.__p3d = {
   overlayShareSpinPivot: () => pivot.children.includes(modelGroup) && pivot.children.includes(overlay),
 };
 
+// ---- URL hash state: #script=REL&p={"D":300} ---------------------------------
+function readHash() {
+  try {
+    const h = new URLSearchParams(location.hash.slice(1));
+    const values = h.get('p') ? JSON.parse(h.get('p')) : {};
+    return { script: h.get('script') || null, values: (values && typeof values === 'object') ? values : {} };
+  } catch (_) { return { script: null, values: {} }; }
+}
+function writeHash() {
+  const h = new URLSearchParams();
+  if (currentScript) h.set('script', currentScript);
+  if (Object.keys(userValues).length) h.set('p', JSON.stringify(userValues));
+  history.replaceState(null, '', h.toString() ? '#' + h.toString() : location.pathname);
+}
+let startupHash = readHash();   // consumed by the first list load only
+
 async function api(path, options) {
   const r = await fetch(path, options);
   const data = await r.json();
@@ -530,6 +546,7 @@ async function render({ rebuildPanel = false, frame = false } = {}) {
 }
 
 function scheduleRender() {
+  writeHash();
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => render(), 120);
 }
@@ -626,6 +643,7 @@ async function loadScript(rel, initialValues = {}) {
   currentValues = {};
   userValues = Object.assign({}, initialValues);   // fresh script: start from its own defaults
   markSelected(rel);
+  writeHash();
   await render({ rebuildPanel: true, frame: true });
 }
 
@@ -665,7 +683,10 @@ async function _loadList({ preferCurrent = false } = {}) {
     markSelected(currentScript);   // list rebuilt; keep the model, overrides and camera as they are
     return;
   }
-  await loadScript(scripts[0]);
+  const wanted = startupHash.script && scripts.includes(startupHash.script) ? startupHash.script : scripts[0];
+  const initial = startupHash.values;
+  startupHash = { script: null, values: {} };
+  await loadScript(wanted, initial);
 }
 loadList().catch(err => {
   document.getElementById('scriptlist').innerHTML = '';
@@ -790,7 +811,7 @@ tb('btnCloseBrowser', () => { stopBrowseRefresh(); document.getElementById('fold
 tb('btnUp', (e) => { if (e.target.dataset.path) browseFolder(e.target.dataset.path); });
 tb('btnUseFolder', () => useBrowseFolder());
 tb('btnFrame', () => frameModel(null));
-tb('btnReset', () => { userValues = {}; render({ rebuildPanel: true, frame: true }); });
+tb('btnReset', () => { userValues = {}; writeHash(); render({ rebuildPanel: true, frame: true }); });
 tb('btnGrid', (e) => { grid.visible = toggle(e.target); requestDraw(); });
 tb('btnPorts', (e) => { showPorts = toggle(e.target); if (lastMeta) drawOverlays(lastMeta); });
 tb('btnDims', (e) => { showDims = toggle(e.target); if (lastMeta) drawOverlays(lastMeta); });

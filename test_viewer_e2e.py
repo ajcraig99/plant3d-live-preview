@@ -258,6 +258,20 @@ class ViewerE2E(unittest.TestCase):
         self.assertEqual(self.hook("overlayCount()"), base + 12)
         self.page.click("#btnFixedDims")
 
+    def test_hash_restores_script_and_overrides(self):
+        self.open("#script=customsupports%2Fplate.py&p=%7B%22L%22%3A77%7D")
+        self.page.wait_for_function("window.__p3d.lastMeta().entry === 'plate'", timeout=10000)
+        self.assertEqual(self.hook("lastMeta().values.L"), 77)
+        self.assertEqual(self.number_input("L").input_value(), "77")
+
+    def test_hash_tracks_changes(self):
+        self.open()
+        self.number_input("W").fill("33")
+        self.page.wait_for_function("location.hash.includes('%22W%22%3A33')", timeout=10000)
+        self.assertIn("script=customsupports%2Fblock.py", self.page.evaluate("location.hash"))
+        self.page.click("#btnReset")
+        self.page.wait_for_function("!location.hash.includes('p=')", timeout=10000)
+
 
 if __name__ == "__main__":
     unittest.main()
