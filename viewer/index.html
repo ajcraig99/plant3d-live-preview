@@ -363,6 +363,7 @@ window.__p3d = {
   userValues: () => userValues,
   renderCount: () => renderCount,
   overlayCount: () => overlay.children.length,
+  cameraPosition: () => camera.position.toArray().map(v => Math.round(v * 1000) / 1000),
 };
 
 async function api(path, options) {
@@ -551,15 +552,29 @@ function buildPanel(meta) {
   });
 }
 
-async function loadScript(rel) {
+const dirOf = (p) => p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
+
+function markSelected(rel) {
+  document.querySelectorAll('.item').forEach(el => el.classList.toggle('sel', el.dataset.path === rel));
+}
+
+async function loadScript(rel, initialValues = {}) {
   currentScript = rel;
   currentValues = {};
-  userValues = {};   // fresh script: start from its own defaults
-  document.querySelectorAll('.item').forEach(el => el.classList.toggle('sel', el.dataset.path === rel));
+  userValues = Object.assign({}, initialValues);   // fresh script: start from its own defaults
+  markSelected(rel);
   await render({ rebuildPanel: true, frame: true });
 }
 
-async function loadList({ preferCurrent = false } = {}) {
+let listPromise = null;
+function loadList(opts) {
+  // Coalesce overlapping calls (page open + first SSE message, root switch + __root__ event).
+  if (listPromise) return listPromise;
+  listPromise = _loadList(opts || {}).finally(() => { listPromise = null; });
+  return listPromise;
+}
+
+async function _loadList({ preferCurrent = false } = {}) {
   const { root, scripts } = await api('/api/scripts');
   currentRoot = root || '';
   document.getElementById('rootpath').textContent = currentRoot || '—';
@@ -572,9 +587,8 @@ async function loadList({ preferCurrent = false } = {}) {
   }
   const byDir = {};
   scripts.forEach(s => {
-    const i = s.lastIndexOf('/');
-    const d = i === -1 ? '' : s.slice(0, i);
-    const f = i === -1 ? s : s.slice(i + 1);
+    const d = dirOf(s);
+    const f = d ? s.slice(d.length + 1) : s;
     (byDir[d] = byDir[d] || []).push({ f, path: s });
   });
   Object.keys(byDir).sort().forEach(d => {
@@ -584,10 +598,18 @@ async function loadList({ preferCurrent = false } = {}) {
       el.onclick = () => loadScript(path); list.appendChild(el);
     });
   });
-  const next = preferCurrent && scripts.includes(currentScript) ? currentScript : scripts[0];
-  if (next) loadScript(next);
+  if (preferCurrent && currentScript && scripts.includes(currentScript)) {
+    markSelected(currentScript);   // list rebuilt; keep the model, overrides and camera as they are
+    return;
+  }
+  await loadScript(scripts[0]);
 }
-loadList();
+loadList().catch(err => {
+  document.getElementById('scriptlist').innerHTML = '';
+  const msg = document.createElement('div'); msg.className = 'empty';
+  msg.textContent = 'cannot reach the preview server: ' + (err.message || err);
+  document.getElementById('scriptlist').appendChild(msg);
+});
 
 function renderBrowser(data) {
   browsePath = data.path;
@@ -671,22 +693,28 @@ async function useBrowseFolder() {
 
 // ---- live reload via SSE --------------------------------------------------
 const dot = document.getElementById('livedot');
+let sseWasOpen = false;
 function connectSSE() {
   const es = new EventSource('/api/events');
-  es.onopen = () => dot.classList.add('live');
+  es.onopen = () => {
+    dot.classList.add('live');
+    if (sseWasOpen) {
+      // Reconnected after the server went away: anything may have changed meanwhile.
+      loadList({ preferCurrent: true }).then(() => render({ rebuildPanel: true }));
+    }
+    sseWasOpen = true;
+  };
   es.onerror = () => { dot.classList.remove('live'); };
   es.onmessage = (e) => {
-    try {
-      const d = JSON.parse(e.data);
-      if (d.changed === '__root__' || d.changed === '__scripts__') {
-        loadList({ preferCurrent: true });
-      } else if (d.changed && d.changed === currentScript) {
-        // re-render keeping the user's explicit overrides; untouched params
-        // follow the file's (possibly edited) defaults. Rebuild the panel in
-        // case the parameter set changed. Camera is left as-is.
-        render({ rebuildPanel: true });
-      }
-    } catch (_) {}
+    let d;
+    try { d = JSON.parse(e.data); } catch (_) { return; }
+    if (!d.changed) return;
+    if (d.changed === '__root__' || d.changed === '__scripts__') { loadList({ preferCurrent: true }); return; }
+    // Any .py in the current script's folder changed (the script itself or a
+    // helper it imports): re-render keeping the user's explicit overrides.
+    // Untouched params follow the file's (possibly edited) defaults. Rebuild
+    // the panel in case the parameter set changed. Camera is left as-is.
+    if (currentScript && dirOf(d.changed) === dirOf(currentScript)) render({ rebuildPanel: true });
   };
 }
 connectSSE();

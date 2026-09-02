@@ -170,6 +170,28 @@ class ViewerE2E(unittest.TestCase):
         self.assertEqual(self.page.locator(".prow").count(), 0)
         self.assertIn("no render", self.page.text_content("#params"))
 
+    def test_new_script_on_disk_does_not_reset_overrides_or_camera(self):
+        self.open()
+        self.number_input("L").fill("123")
+        self.page.wait_for_function("window.__p3d.lastMeta().values.L === 123", timeout=10000)
+        cam_before = self.hook("cameraPosition()")
+        write_script(self.scripts_dir, "extra", PLATE)
+        self.page.wait_for_function("document.querySelectorAll('.item').length === 3", timeout=10000)
+        self.page.wait_for_timeout(500)
+        self.assertEqual(self.hook("userValues().L"), 123)
+        self.assertEqual(self.number_input("L").input_value(), "123")
+        self.assertEqual(self.hook("cameraPosition()"), cam_before)
+        self.assertTrue(self.page.locator(".item.sel", has_text="block.py").count() == 1)
+
+    def test_editing_a_sibling_file_rerenders_current_script(self):
+        self.open()
+        before = self.hook("renderCount()")
+        # touch a different file in the same folder (a helper module would be the real case)
+        with open(os.path.join(self.scripts_dir, "plate.py"), "a") as f:
+            f.write("\n# touched\n")
+        self.page.wait_for_function("window.__p3d.renderCount() > %d" % before, timeout=10000)
+        self.assertIn("block()", self.page.text_content("#hud"))
+
 
 if __name__ == "__main__":
     unittest.main()
