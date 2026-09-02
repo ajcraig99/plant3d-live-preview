@@ -354,6 +354,16 @@ let browsePath = '';
 let currentValues = {};   // effective values reported by the last render (display)
 let userValues = {};      // ONLY params the user explicitly overrode (sent to server)
 let debounceTimer = null;
+let lastMeta = null;       // meta of the last successful render (for overlay redraws and tests)
+let renderCount = 0;       // number of /api/render requests issued
+
+// Test hook: read-only access for the Playwright suite. Not used by the UI.
+window.__p3d = {
+  lastMeta: () => lastMeta,
+  userValues: () => userValues,
+  renderCount: () => renderCount,
+  overlayCount: () => overlay.children.length,
+};
 
 async function api(path, options) {
   const r = await fetch(path, options);
@@ -415,6 +425,7 @@ async function render({ rebuildPanel = false, frame = false } = {}) {
   if (!currentScript) return;
   // Always send only explicit overrides so untouched params follow the file's
   // current defaults (important for live-reload after editing a default).
+  renderCount++;
   const url = `/api/render?script=${encodeURIComponent(currentScript)}&params=${encodeURIComponent(JSON.stringify(userValues))}`;
   let data;
   try {
@@ -462,6 +473,7 @@ async function render({ rebuildPanel = false, frame = false } = {}) {
     warns.textContent = '⚠ ' + meta.warnings.join('\n⚠ ');
   } else warns.style.display = 'none';
 
+  lastMeta = meta;
   if (rebuildPanel) buildPanel(meta);
   return meta;
 }
