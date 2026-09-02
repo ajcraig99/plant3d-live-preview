@@ -319,6 +319,7 @@ function drawDimLine(dm, color, labelColor, withPrimitiveName = false) {
   });
   const name = withPrimitiveName && dm.primitive ? `${dm.primitive}.${dm.name}` : dm.name;
   const lbl = makeLabel(`${name}=${len.toFixed(1)}`, labelColor);
+  if (withPrimitiveName) lbl.scale.multiplyScalar(0.75);
   lbl.position.copy(a.clone().add(b).multiplyScalar(0.5));
   overlay.add(lbl);
 }

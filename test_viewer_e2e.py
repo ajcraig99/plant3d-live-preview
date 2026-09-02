@@ -248,6 +248,16 @@ class ViewerE2E(unittest.TestCase):
         rng = self.row("L").locator("input[type=range]")
         self.assertGreater(float(rng.get_attribute("min")), 0.0)
 
+    def test_fixed_dims_button_draws_primitive_dimensions(self):
+        self.open()
+        self.assertEqual(len(self.hook("lastMeta().primitive_dims")), 3)   # BOX: L, W, H
+        base = self.hook("overlayCount()")
+        self.page.click("#btnFixedDims")
+        self.page.wait_for_timeout(200)
+        # each dim line adds a line, two end dots and a label = 4 objects
+        self.assertEqual(self.hook("overlayCount()"), base + 12)
+        self.page.click("#btnFixedDims")
+
 
 if __name__ == "__main__":
     unittest.main()
