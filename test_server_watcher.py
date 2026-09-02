@@ -1,6 +1,8 @@
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -86,6 +88,39 @@ class DiscoveryHardeningTests(unittest.TestCase):
         # _watch_poll is one iteration of the watcher loop; it must never raise.
         with mock.patch("server._snapshot", side_effect=RuntimeError("disk went away")):
             self.assertEqual(server._watch_poll({}), {})
+
+
+class NotifyTests(unittest.TestCase):
+    def test_notify_wakes_a_waiting_event_stream_immediately(self):
+        woke = []
+
+        def waiter():
+            with server._watch_cond:
+                start = server._watch_version
+                server._watch_cond.wait_for(lambda: server._watch_version != start, timeout=5.0)
+                woke.append(time.monotonic())
+
+        t = threading.Thread(target=waiter)
+        t.start()
+        time.sleep(0.05)
+        fired = time.monotonic()
+        server._notify("customsupports/one.py")
+        t.join(timeout=6.0)
+        self.assertEqual(len(woke), 1)
+        self.assertLess(woke[0] - fired, 0.5)
+        with server._watch_lock:
+            self.assertEqual(server._last_changed, "customsupports/one.py")
+
+    def test_set_root_changes_root_under_lock_and_notifies(self):
+        saved = server.ROOT
+        try:
+            before = server._watch_version
+            server._set_root(os.path.dirname(os.path.abspath(__file__)))
+            self.assertEqual(server.ROOT, os.path.dirname(os.path.abspath(__file__)))
+            self.assertEqual(server._watch_version, before + 1)
+            self.assertEqual(server._last_changed, "__root__")
+        finally:
+            server.ROOT = saved
 
 
 if __name__ == "__main__":

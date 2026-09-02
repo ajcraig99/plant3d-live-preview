@@ -39,6 +39,7 @@ ROOT = os.path.abspath(os.path.join(_HERE, ".."))     # repo root by default
 _SKIP_DIRS = {"__pycache__", ".venv", ".git"}
 _watch_version = 0
 _watch_lock = threading.Lock()
+_watch_cond = threading.Condition(_watch_lock)   # notifies SSE streams instantly
 _last_changed = ""
 
 
@@ -167,9 +168,19 @@ def _watch_poll(mtimes):
 
 def _notify(changed):
     global _watch_version, _last_changed
-    with _watch_lock:
+    with _watch_cond:
         _watch_version += 1
         _last_changed = changed
+        _watch_cond.notify_all()
+
+
+def _set_root(path):
+    """Switch the watched root. Taken under the watch lock so a poll never
+    sees a half-switched state, then broadcast to clients."""
+    global ROOT
+    with _watch_cond:
+        ROOT = path
+    _notify("__root__")
 
 
 def watcher():
@@ -261,7 +272,6 @@ class Handler(BaseHTTPRequestHandler):
         }))
 
     def _handle_set_root(self):
-        global ROOT
         try:
             payload = self._read_json_body()
         except ValueError as e:
@@ -269,8 +279,7 @@ class Handler(BaseHTTPRequestHandler):
         path = os.path.abspath(str(payload.get("path", "")))
         if not os.path.isdir(path):
             self._send(400, json.dumps({"error": "not a directory: %s" % path})); return
-        ROOT = path
-        _notify("__root__")
+        _set_root(path)
         self._send(200, json.dumps({"root": ROOT, "scripts": discover_scripts()}))
 
     def _handle_render(self, q):
@@ -306,19 +315,20 @@ class Handler(BaseHTTPRequestHandler):
         last = -1
         try:
             while True:
-                with _watch_lock:
+                with _watch_cond:
+                    if _watch_version == last:
+                        # Woken by _notify, or every 15 s for a heartbeat so
+                        # proxies / the client keep the stream open.
+                        _watch_cond.wait(timeout=15.0)
                     v, ch = _watch_version, _last_changed
                 if v != last:
                     last = v
                     payload = json.dumps({"version": v, "changed": ch})
                     self.wfile.write(("data: %s\n\n" % payload).encode())
-                    self.wfile.flush()
                 else:
-                    # heartbeat so proxies / the client keep the stream open
                     self.wfile.write(b": ping\n\n")
-                    self.wfile.flush()
-                time.sleep(1.0)
-        except (BrokenPipeError, ConnectionResetError):
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
 
