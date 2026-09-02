@@ -13,6 +13,7 @@ Usable as a library (see render_script) or a CLI:
 import os
 import sys
 import json
+import time
 import inspect
 import importlib.util
 
@@ -159,6 +160,7 @@ def render_script(path, params=None, segments=None):
                 values[k] = v
 
     s = Scene(segments=segments)
+    t0 = time.perf_counter()
     try:
         fn(s, **values)
     except Exception as e:
@@ -187,6 +189,8 @@ def render_script(path, params=None, segments=None):
         b = scene.bounds
         bounds = {"min": b[0].tolist(), "max": b[1].tolist()}
 
+    elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+
     meta = {
         "script": os.path.basename(path),
         "entry": fn.__name__,
@@ -200,6 +204,7 @@ def render_script(path, params=None, segments=None):
         "solid_count": len(live),
         "bounds": bounds,
         "segments": s.segments,
+        "elapsed_ms": elapsed_ms,
     }
     return {"glb": glb, "meta": meta}
 

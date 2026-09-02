@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -100,6 +101,65 @@ class StaticAndBodyTests(ServerTestCase):
         status, data = self.get("/api/render?script=../server.py")
         self.assertEqual(status, 400)
         self.assertIn("escapes root", json.loads(data)["error"])
+
+
+class RemoteSafetyAndRenderOptionsTests(ServerTestCase):
+    def test_browse_and_root_refused_when_root_changes_disabled(self):
+        saved = server.ALLOW_ROOT_CHANGE
+        server.ALLOW_ROOT_CHANGE = False
+        try:
+            status, data = self.get("/api/browse?path=" + self.root)
+            self.assertEqual(status, 403)
+            self.assertIn("--allow-remote-root", json.loads(data)["error"])
+            status, _ = self.post_raw("/api/root", json.dumps({"path": self.root}).encode())
+            self.assertEqual(status, 403)
+        finally:
+            server.ALLOW_ROOT_CHANGE = saved
+
+    def test_browse_allowed_by_default(self):
+        status, data = self.get("/api/browse?path=" + self.root)
+        self.assertEqual(status, 200)
+        names = [e["name"] for e in json.loads(data)["entries"]]
+        self.assertEqual(names, ["customsupports"])
+
+    def test_render_reports_elapsed_and_honours_segments(self):
+        status, data = self.get("/api/render?script=customsupports/plate.py&segments=16")
+        self.assertEqual(status, 200)
+        meta = json.loads(data)["meta"]
+        self.assertEqual(meta["segments"], 16)
+        self.assertGreaterEqual(meta["elapsed_ms"], 0.0)
+
+    def test_segments_is_clamped_and_bad_values_ignored(self):
+        _, data = self.get("/api/render?script=customsupports/plate.py&segments=100000")
+        self.assertEqual(json.loads(data)["meta"]["segments"], 256)
+        _, data = self.get("/api/render?script=customsupports/plate.py&segments=abc")
+        self.assertEqual(json.loads(data)["meta"]["segments"], server.R.Scene().segments)
+
+
+class MainTests(unittest.TestCase):
+    def test_browser_url_uses_loopback_when_bound_to_all_interfaces(self):
+        self.assertEqual(server._browser_url("0.0.0.0", 8770), "http://127.0.0.1:8770/")
+        self.assertEqual(server._browser_url("::", 8770), "http://127.0.0.1:8770/")
+        self.assertEqual(server._browser_url("192.168.1.5", 8770), "http://192.168.1.5:8770/")
+
+    def test_root_changes_disabled_for_non_loopback_hosts(self):
+        self.assertTrue(server._root_changes_allowed("127.0.0.1", False))
+        self.assertTrue(server._root_changes_allowed("localhost", False))
+        self.assertFalse(server._root_changes_allowed("0.0.0.0", False))
+        self.assertTrue(server._root_changes_allowed("0.0.0.0", True))
+
+    def test_port_in_use_is_reported_not_raised(self):
+        # Simulate the bind failure rather than really double-binding: with
+        # SO_REUSEADDR set by HTTPServer, Windows may let a second bind succeed
+        # and main() would then block in serve_forever.
+        saved_root, saved_allow = server.ROOT, server.ALLOW_ROOT_CHANGE
+        try:
+            with mock.patch("server.ThreadingHTTPServer",
+                            side_effect=OSError(98, "Address already in use")):
+                code = server.main(["--port", "8770", "--no-open", "--root", os.path.dirname(__file__)])
+            self.assertEqual(code, 1)
+        finally:
+            server.ROOT, server.ALLOW_ROOT_CHANGE = saved_root, saved_allow
 
 
 if __name__ == "__main__":

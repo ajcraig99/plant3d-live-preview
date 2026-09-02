@@ -6,13 +6,13 @@ save: the model re-renders automatically. Drag the parameter sliders to explore
 a fitting's design space without touching Plant 3D at all.
 
     python server.py                 # serve ./.. (repo root), open :8770
-    python server.py --root DIR --port N --no-open
+    python server.py --root DIR --port N --no-open --allow-remote-root
 
 Endpoints:
     GET /                     viewer HTML
     GET /vendor/*, /viewer/*  static assets
     GET /api/scripts          JSON {root, scripts}
-    GET /api/render?script=REL&params=JSON   -> {meta, glb_b64}
+    GET /api/render?script=REL&params=JSON&segments=N   -> {meta, glb_b64}
     GET /api/browse?path=DIR  JSON {path, parent, entries: [{name, path, has_scripts}]}
     POST /api/root {"path": DIR}   switch the watched root -> {root, scripts}
     GET /api/events           text/event-stream; fires when any script changes
@@ -41,6 +41,8 @@ _watch_version = 0
 _watch_lock = threading.Lock()
 _watch_cond = threading.Condition(_watch_lock)   # notifies SSE streams instantly
 _last_changed = ""
+ALLOW_ROOT_CHANGE = True   # main() turns this off for non-loopback binds
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 def _script_subdirs(root):
@@ -152,6 +154,27 @@ def _static_path(url_path):
     return full
 
 
+def _root_changes_allowed(host, allow_remote_root):
+    """Browsing the filesystem and switching root are only safe from the local
+    machine. On a LAN bind they are off unless explicitly re-enabled."""
+    return host in _LOOPBACK_HOSTS or bool(allow_remote_root)
+
+
+def _browser_url(host, port):
+    open_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    return "http://%s:%d/" % (open_host, port)
+
+
+def _parse_segments(q):
+    """Facet count from the query string, clamped to [8, 256]; None if absent
+    or not an integer."""
+    raw = (q.get("segments") or [""])[0]
+    try:
+        return max(8, min(256, int(raw)))
+    except ValueError:
+        return None
+
+
 def _watch_poll(mtimes):
     """One watcher iteration. Returns the new mtime map. Never raises: a bad
     poll (permission error, unplugged drive) must not kill live reload."""
@@ -258,6 +281,10 @@ class Handler(BaseHTTPRequestHandler):
         return payload
 
     def _handle_browse(self, q):
+        if not ALLOW_ROOT_CHANGE:
+            self._send(403, json.dumps({
+                "error": "browsing and root changes are disabled on a non-loopback bind; "
+                         "start with --allow-remote-root to enable"})); return
         path = (q.get("path") or [""])[0] or ROOT
         path = os.path.abspath(path)
         if not os.path.isdir(path):
@@ -272,6 +299,10 @@ class Handler(BaseHTTPRequestHandler):
         }))
 
     def _handle_set_root(self):
+        if not ALLOW_ROOT_CHANGE:
+            self._send(403, json.dumps({
+                "error": "browsing and root changes are disabled on a non-loopback bind; "
+                         "start with --allow-remote-root to enable"})); return
         try:
             payload = self._read_json_body()
         except ValueError as e:
@@ -297,7 +328,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:
             self._send(400, json.dumps({"error": str(e)})); return
         try:
-            result = R.render_script(full, params)
+            result = R.render_script(full, params, segments=_parse_segments(q))
         except R.RenderError as e:
             self._send(200, json.dumps({"error": str(e), "script": rel})); return
         except Exception as e:  # last-resort guard so the server never dies
@@ -333,21 +364,34 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main(argv):
-    global ROOT
+    global ROOT, ALLOW_ROOT_CHANGE
     import argparse
     ap = argparse.ArgumentParser(description="Plant 3D live preview server.")
-    ap.add_argument("--root", default=ROOT, help="repo root containing custom* dirs")
+    ap.add_argument("--root", default=ROOT, help="folder containing your Plant 3D custom scripts")
     ap.add_argument("--port", type=int, default=8770)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--no-open", action="store_true", help="don't open a browser")
+    ap.add_argument("--allow-remote-root", action="store_true",
+                    help="allow folder browsing / root switching when bound to a non-loopback host")
     args = ap.parse_args(argv)
     ROOT = os.path.abspath(args.root)
+    ALLOW_ROOT_CHANGE = _root_changes_allowed(args.host, args.allow_remote_root)
+
+    try:
+        httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError as e:
+        print("Cannot listen on %s:%d (%s). Is another preview server running? "
+              "Try --port with a different number." % (args.host, args.port, e.strerror or e),
+              file=sys.stderr)
+        return 1
 
     threading.Thread(target=watcher, daemon=True).start()
-    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
-    url = "http://%s:%d/" % (args.host, args.port)
+    url = _browser_url(args.host, args.port)
     print("Plant 3D preview server running at", url)
     print("Watching:", ROOT)
+    if not ALLOW_ROOT_CHANGE:
+        print("Folder browsing / root switching disabled (non-loopback bind). "
+              "Use --allow-remote-root to enable.")
     print("Ctrl-C to stop.")
     if not args.no_open:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
@@ -355,7 +399,10 @@ def main(argv):
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nbye")
+    finally:
+        httpd.server_close()
+    return 0
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))
