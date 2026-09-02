@@ -74,6 +74,25 @@ class ShimTests(unittest.TestCase):
         self.assertIn("CYLINDER", meta["warnings"][0])
         self.assertIn("no geometry", meta["warnings"][0])
 
+    def test_aqa_math_exposes_full_python_math_surface(self):
+        result = render_temp_script(
+            "mathuse",
+            """
+            from varmain.primitiv import *
+            from varmain.custom import *
+            from aqa.math import *
+
+            @activate(Group="Test", LengthUnit="mm")
+            def {stem}(s, **kw):
+                r = log10(1000.0) * 10.0          # 30
+                assert isclose(asRadiants(180.0), pi)
+                assert isfinite(hypot(3.0, 4.0, 12.0))
+                SPHERE(s, R=r)
+            """,
+        )
+        self.assertEqual(result["meta"]["solid_count"], 1)
+        self.assertEqual(result["meta"]["warnings"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
