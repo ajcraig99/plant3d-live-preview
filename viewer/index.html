@@ -51,6 +51,7 @@
   #stage { position: relative; flex: 1; min-height: 0; background: radial-gradient(120% 120% at 50% 0%, #1c2128 0%, #0f1216 100%); }
   #canvas { width: 100%; height: 100%; display: block; }
   #toolbar { position: absolute; top: 10px; left: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  #toolbar input[type=range] { width: 120px; accent-color: var(--accent); align-self: center; }
   .btn { background: rgba(30,35,42,.85); color: var(--fg); border: 1px solid var(--line);
     border-radius: 6px; padding: 5px 9px; font-size: 12px; cursor: pointer; backdrop-filter: blur(4px); }
   .btn:hover { border-color: var(--accent); }
@@ -130,6 +131,9 @@
           <option value="96" selected>96 facets</option>
           <option value="160">160 facets</option>
         </select>
+        <button class="btn" id="btnSection" title="Cut the model with a plane">Section</button>
+        <button class="btn" id="btnSecAxis" hidden title="Which Plant axis the cut plane is normal to">Axis Z</button>
+        <input type="range" id="secPos" min="0" max="100" value="50" hidden title="Cut position">
       </div>
       <div id="banner"></div>
       <div id="warns"></div>
@@ -161,6 +165,7 @@ const canvas = document.getElementById('canvas');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.autoClear = false;
+renderer.localClippingEnabled = true;
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100000);
 camera.position.set(220, 180, 260);
@@ -357,6 +362,34 @@ function drawOverlays(meta) {
   requestDraw();
 }
 
+// ---- section cut ------------------------------------------------------------
+// Viewer axes vs Plant axes: viewer X = Plant X, viewer Y = Plant Z, viewer Z = Plant -Y.
+const SECTION_AXES = [{ viewer: 0, label: 'X' }, { viewer: 1, label: 'Z' }, { viewer: 2, label: 'Y' }];
+let sectionOn = false, sectionAxisIdx = 1, sectionFrac = 0.5;
+const sectionPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
+
+function updateSection() {
+  const box = new THREE.Box3().setFromObject(modelGroup);
+  if (!box.isEmpty()) {
+    const axis = SECTION_AXES[sectionAxisIdx].viewer;
+    const lo = box.min.getComponent(axis), hi = box.max.getComponent(axis);
+    const pos = lo + (hi - lo) * sectionFrac;
+    const n = new THREE.Vector3(); n.setComponent(axis, -1);
+    // Plane: n·p + c = 0. three.js keeps the side where n·p + c >= 0,
+    // i.e. coordinate <= pos. The cut opens the interior towards the camera.
+    sectionPlane.set(n, pos);
+  }
+  const planes = sectionOn ? [sectionPlane] : [];
+  modelGroup.traverse(o => {
+    const mats = o.material ? [].concat(o.material) : [];
+    mats.forEach(m => { m.clippingPlanes = planes; m.needsUpdate = true; });
+  });
+  document.getElementById('btnSecAxis').hidden = !sectionOn;
+  document.getElementById('secPos').hidden = !sectionOn;
+  document.getElementById('btnSecAxis').textContent = 'Axis ' + SECTION_AXES[sectionAxisIdx].label;
+  requestDraw();
+}
+
 function frameModel(bounds) {
   const box = new THREE.Box3();
   if (bounds) box.set(new THREE.Vector3(...bounds.min), new THREE.Vector3(...bounds.max));
@@ -400,6 +433,7 @@ window.__p3d = {
   pivotRotationY: () => pivot.rotation.y,
   overlayShareSpinPivot: () => pivot.children.includes(modelGroup) && pivot.children.includes(overlay),
   paramString, exportName,
+  clipPlaneCount: () => { let n = 0; modelGroup.traverse(o => { if (o.isMesh) n += (o.material.clippingPlanes || []).length; }); return n; },
 };
 
 // ---- URL hash state: #script=REL&p={"D":300} ---------------------------------
@@ -472,6 +506,7 @@ function applyMaterials() {
       o.userData.edgeLines.visible = !wire;
     }
   });
+  updateSection();
   requestDraw();
 }
 
@@ -870,5 +905,8 @@ tb('btnSpin', (e) => { spin = toggle(e.target); });
 tb('btnExport', () => downloadGlb());
 tb('btnCopy', () => copyParams());
 document.getElementById('segSel').addEventListener('change', (e) => { segments = +e.target.value; render(); });
+tb('btnSection', (e) => { sectionOn = toggle(e.target); updateSection(); });
+tb('btnSecAxis', () => { sectionAxisIdx = (sectionAxisIdx + 1) % SECTION_AXES.length; updateSection(); });
+document.getElementById('secPos').addEventListener('input', (e) => { sectionFrac = e.target.value / 100; updateSection(); });
 addEventListener('resize', resize);
 </script>

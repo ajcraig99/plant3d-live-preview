@@ -298,6 +298,18 @@ class ViewerE2E(unittest.TestCase):
         self.page.select_option("#segSel", "32")
         self.page.wait_for_function("window.__p3d.lastMeta().segments === 32", timeout=10000)
 
+    def test_section_cut_clips_materials(self):
+        self.open()
+        self.assertEqual(self.hook("clipPlaneCount()"), 0)
+        self.page.click("#btnSection")
+        self.page.wait_for_timeout(200)
+        self.assertGreater(self.hook("clipPlaneCount()"), 0)
+        self.page.click("#btnSecAxis")
+        self.assertEqual(self.page.text_content("#btnSecAxis").strip(), "Axis Y")
+        self.page.click("#btnSection")
+        self.page.wait_for_timeout(200)
+        self.assertEqual(self.hook("clipPlaneCount()"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
