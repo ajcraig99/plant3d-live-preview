@@ -292,6 +292,12 @@ class ViewerE2E(unittest.TestCase):
         self.assertEqual(self.hook("exportName()"), "block.glb")
         self.assertFalse(self.page.locator("#btnExport").is_disabled())
 
+    def test_segments_select_changes_mesh_density(self):
+        self.open()
+        self.assertEqual(self.hook("lastMeta().segments"), server.R.Scene().segments)
+        self.page.select_option("#segSel", "32")
+        self.page.wait_for_function("window.__p3d.lastMeta().segments === 32", timeout=10000)
+
 
 if __name__ == "__main__":
     unittest.main()

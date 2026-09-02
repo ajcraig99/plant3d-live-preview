@@ -124,6 +124,12 @@
         <button class="btn" id="btnSpin">Spin</button>
         <button class="btn" id="btnExport" title="Download the current mesh as .glb">Export GLB</button>
         <button class="btn" id="btnCopy" title="Copy a render.py command line with your overrides">Copy params</button>
+        <select class="btn" id="segSel" title="Facets per circle (preview smoothness vs speed)">
+          <option value="32">32 facets</option>
+          <option value="48">48 facets</option>
+          <option value="96" selected>96 facets</option>
+          <option value="160">160 facets</option>
+        </select>
       </div>
       <div id="banner"></div>
       <div id="warns"></div>
@@ -470,6 +476,7 @@ function applyMaterials() {
 }
 
 let renderSeq = 0;         // increments per request; responses older than the latest are dropped
+let segments = 96;
 
 function showBanner(text) {
   const banner = document.getElementById('banner');
@@ -548,7 +555,7 @@ async function render({ rebuildPanel = false, frame = false } = {}) {
   renderCount++;
   // Always send only explicit overrides so untouched params follow the file's
   // current defaults (important for live-reload after editing a default).
-  const url = `/api/render?script=${encodeURIComponent(script)}&params=${encodeURIComponent(JSON.stringify(userValues))}`;
+  const url = `/api/render?script=${encodeURIComponent(script)}&params=${encodeURIComponent(JSON.stringify(userValues))}&segments=${segments}`;
   let data;
   try {
     data = await api(url);
@@ -862,5 +869,6 @@ tb('btnWire', (e) => { wire = toggle(e.target); applyMaterials(); });
 tb('btnSpin', (e) => { spin = toggle(e.target); });
 tb('btnExport', () => downloadGlb());
 tb('btnCopy', () => copyParams());
+document.getElementById('segSel').addEventListener('change', (e) => { segments = +e.target.value; render(); });
 addEventListener('resize', resize);
 </script>
