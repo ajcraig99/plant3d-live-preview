@@ -56,6 +56,24 @@ class ShimTests(unittest.TestCase):
             )
         self.assertIn("NameError", str(ctx.exception))
 
+    def test_zero_radius_cylinder_warns_instead_of_vanishing_silently(self):
+        result = render_temp_script(
+            "zero_cyl",
+            """
+            from varmain.primitiv import *
+            from varmain.custom import *
+
+            @activate(Group="Test", LengthUnit="mm")
+            def {stem}(s, **kw):
+                CYLINDER(s, R=0.0, H=10.0)
+            """,
+        )
+        meta = result["meta"]
+        self.assertEqual(meta["solid_count"], 0)
+        self.assertEqual(len(meta["warnings"]), 1)
+        self.assertIn("CYLINDER", meta["warnings"][0])
+        self.assertIn("no geometry", meta["warnings"][0])
+
 
 if __name__ == "__main__":
     unittest.main()

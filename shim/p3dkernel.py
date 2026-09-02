@@ -164,8 +164,21 @@ class Solid:
 # Primitive constructors. Each takes the scene `s` first and returns a Solid.
 # ---------------------------------------------------------------------------
 
+def _finish(s, name, manifold, args):
+    """Wrap `manifold` in a Solid and warn if it came out empty, which is what
+    happens for zero or negative sizes. A silently missing part is confusing
+    in a preview, so say so."""
+    solid = Solid(s, manifold)
+    if manifold.is_empty():
+        desc = ", ".join("%s=%s" % (k, v) for k, v in args.items())
+        s.warnings.append(
+            "%s(%s) produced no geometry (check for zero or negative sizes)" % (name, desc))
+    return solid
+
+
 def BOX(s, L=1.0, W=1.0, H=1.0, **kw):
-    return Solid(s, Manifold.cube([float(H), float(L), float(W)], True))
+    return _finish(s, "BOX", Manifold.cube([float(H), float(L), float(W)], True),
+                   {"L": L, "W": W, "H": H})
 
 
 def CYLINDER(s, R=None, H=1.0, O=0.0, R1=None, R2=None, **kw):
@@ -178,35 +191,35 @@ def CYLINDER(s, R=None, H=1.0, O=0.0, R1=None, R2=None, **kw):
     else:
         r = float(R if R is not None else (R1 if R1 is not None else 1.0))
         outer = Manifold.cylinder(H, r, r, SEGMENTS, False)
-    solid = Solid(s, outer)
     O = float(O or 0.0)
     if O > 0.0:
         bore = Manifold.cylinder(H + 2 * _EPS, O, O, SEGMENTS, False).translate((0, 0, -_EPS))
-        solid.m = solid.m - bore
-    return solid
+        outer = outer - bore
+    return _finish(s, "CYLINDER", outer, {"R": R, "H": H, "O": O, "R1": R1, "R2": R2})
 
 
 def CONE(s, R1=1.0, R2=0.0, H=1.0, E=0.0, **kw):
     # E (eccentricity) is 0.0 everywhere in the repo; concentric cone.
-    return Solid(s, Manifold.cylinder(float(H), float(R1), float(R2), SEGMENTS, False))
+    return _finish(s, "CONE", Manifold.cylinder(float(H), float(R1), float(R2), SEGMENTS, False),
+                   {"R1": R1, "R2": R2, "H": H})
 
 
 def TORUS(s, R1=1.0, R2=0.5, **kw):
     # Ring radius R1, tube radius R2. Revolve a circle; manifold's revolve puts
     # the resulting axis on Z, matching Plant's TORUS (ring in XY plane).
     circle = CrossSection.circle(float(R2), SEGMENTS).translate((float(R1), 0.0))
-    return Solid(s, Manifold.revolve(circle, SEGMENTS, 360.0))
+    return _finish(s, "TORUS", Manifold.revolve(circle, SEGMENTS, 360.0), {"R1": R1, "R2": R2})
 
 
 def SPHERE(s, R=1.0, **kw):
-    return Solid(s, Manifold.sphere(float(R), SEGMENTS))
+    return _finish(s, "SPHERE", Manifold.sphere(float(R), SEGMENTS), {"R": R})
 
 
 def HALFSPHERE(s, R=1.0, **kw):
     sph = Manifold.sphere(float(R), SEGMENTS)
     # keep the +Z half
     box = Manifold.cube([4 * float(R), 4 * float(R), 4 * float(R)], True).translate((0, 0, 2 * float(R)))
-    return Solid(s, sph ^ box)
+    return _finish(s, "HALFSPHERE", sph ^ box, {"R": R})
 
 
 def ELLIPSOIDHEAD(s, R=1.0, H=None, **kw):
@@ -215,4 +228,4 @@ def ELLIPSOIDHEAD(s, R=1.0, H=None, **kw):
     h = float(H) if H is not None else r / 2.0
     sph = Manifold.sphere(r, SEGMENTS)
     box = Manifold.cube([4 * r, 4 * r, 4 * r], True).translate((0, 0, 2 * r))
-    return Solid(s, (sph ^ box).scale((1.0, 1.0, h / r)))
+    return _finish(s, "ELLIPSOIDHEAD", (sph ^ box).scale((1.0, 1.0, h / r)), {"R": R, "H": h})
