@@ -192,6 +192,36 @@ class ViewerE2E(unittest.TestCase):
         self.page.wait_for_function("window.__p3d.renderCount() > %d" % before, timeout=10000)
         self.assertIn("block()", self.page.text_content("#hud"))
 
+    def test_idle_viewer_stops_drawing_and_resizing(self):
+        self.open()
+        self.page.wait_for_timeout(1500)          # let orbit damping settle
+        draws = self.hook("drawCount()"); resizes = self.hook("resizeCount()")
+        self.page.wait_for_timeout(1000)
+        self.assertEqual(self.hook("drawCount()"), draws)
+        self.assertEqual(self.hook("resizeCount()"), resizes)
+
+    def test_hidpi_context_does_not_resize_every_frame(self):
+        ctx = self.browser.new_context(viewport={"width": 1000, "height": 700}, device_scale_factor=2)
+        try:
+            page = ctx.new_page()
+            page.goto(self.url)
+            page.wait_for_function("window.__p3d && window.__p3d.lastMeta() !== null", timeout=20000)
+            page.wait_for_timeout(1500)
+            resizes = page.evaluate("window.__p3d.resizeCount()")
+            page.wait_for_timeout(1000)
+            self.assertEqual(page.evaluate("window.__p3d.resizeCount()"), resizes)
+            self.assertLessEqual(resizes, 3)
+        finally:
+            ctx.close()
+
+    def test_spin_rotates_model_and_overlays_together(self):
+        self.open()
+        self.assertTrue(self.hook("overlayShareSpinPivot()"))
+        self.page.click("#btnSpin")
+        self.page.wait_for_timeout(400)
+        self.assertGreater(self.hook("pivotRotationY()"), 0)
+        self.page.click("#btnSpin")
+
 
 if __name__ == "__main__":
     unittest.main()

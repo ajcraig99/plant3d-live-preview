@@ -156,7 +156,9 @@ const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
 
 scene.add(new THREE.HemisphereLight(0xbfd3ff, 0x28303a, 1.15));
-const key = new THREE.DirectionalLight(0xffffff, 2.0); key.position.set(1, 2, 1.5); scene.add(key);
+// The key light rides with the camera so the side you are looking at is never black.
+const key = new THREE.DirectionalLight(0xffffff, 2.0); key.position.set(1, 2, 1.5);
+camera.add(key); scene.add(camera);
 const fill = new THREE.DirectionalLight(0xffffff, 0.7); fill.position.set(-1.5, -0.5, -1); scene.add(fill);
 
 let grid = new THREE.GridHelper(400, 20, 0x3a4350, 0x252b33);
@@ -172,8 +174,11 @@ addUcsAxis(new THREE.Vector3(1, 0, 0), 0xff5d5d, 'X');
 addUcsAxis(new THREE.Vector3(0, 1, 0), 0x65d982, 'Y');
 addUcsAxis(new THREE.Vector3(0, 0, 1), 0x5da7ff, 'Z');
 
-const modelGroup = new THREE.Group(); scene.add(modelGroup);   // GLB (already Y-up)
-const overlay = new THREE.Group(); scene.add(overlay);          // ports + dims
+// Everything that belongs to the part hangs off `pivot`, so Spin turns the
+// mesh, the ports and the dimension lines as one.
+const pivot = new THREE.Group(); scene.add(pivot);
+const modelGroup = new THREE.Group(); pivot.add(modelGroup);   // GLB (already Y-up)
+const overlay = new THREE.Group(); pivot.add(overlay);          // ports + dims
 
 const loader = new GLTFLoader();
 const CREASE_ANGLE = THREE.MathUtils.degToRad(30);
@@ -185,22 +190,33 @@ const P = (p) => new THREE.Vector3(p[0], p[2], -p[1]);
 let spin = false, showPorts = true, showDims = true, showFixedDims = false, wire = false;
 let modelRadius = 100;
 
+let needsDraw = true;      // set by anything that changes what is on screen
+let drawCount = 0, resizeCount = 0;
+function requestDraw() { needsDraw = true; }
+
 function resize() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
-  if (canvas.width !== w || canvas.height !== h) {
+  const cur = renderer.getSize(new THREE.Vector2());   // CSS pixels, unlike canvas.width
+  if (cur.x !== w || cur.y !== h) {
     renderer.setSize(w, h, false);
     camera.aspect = w / h; camera.updateProjectionMatrix();
+    resizeCount++;
+    needsDraw = true;
   }
 }
-function tick() {
-  resize();
-  if (spin) modelGroup.rotation.y += 0.005;
-  controls.update();
+function draw() {
+  drawCount++;
   renderer.setViewport(0, 0, canvas.clientWidth, canvas.clientHeight);
   renderer.setScissorTest(false);
   renderer.clear();
   renderer.render(scene, camera);
   renderUcsInset();
+}
+function tick() {
+  resize();
+  const moved = controls.update();   // true while orbiting or damping
+  if (spin) { pivot.rotation.y += 0.005; needsDraw = true; }
+  if (moved || needsDraw) { needsDraw = false; draw(); }
   requestAnimationFrame(tick);
 }
 tick();
@@ -325,6 +341,7 @@ function drawOverlays(meta) {
   if (showFixedDims && meta.primitive_dims) {
     meta.primitive_dims.forEach(dm => drawDimLine(dm, 0x65d982, '#a8f0bd', true));
   }
+  requestDraw();
 }
 
 function frameModel(bounds) {
@@ -345,6 +362,7 @@ function frameModel(bounds) {
   grid = new THREE.GridHelper(gs * 2, 20, 0x3a4350, 0x252b33); grid.visible = document.getElementById('btnGrid').classList.contains('on');
   scene.add(grid);
   axes.scale.setScalar(modelRadius / 60);
+  requestDraw();
 }
 
 // ---- data flow ------------------------------------------------------------
@@ -364,6 +382,10 @@ window.__p3d = {
   renderCount: () => renderCount,
   overlayCount: () => overlay.children.length,
   cameraPosition: () => camera.position.toArray().map(v => Math.round(v * 1000) / 1000),
+  drawCount: () => drawCount,
+  resizeCount: () => resizeCount,
+  pivotRotationY: () => pivot.rotation.y,
+  overlayShareSpinPivot: () => pivot.children.includes(modelGroup) && pivot.children.includes(overlay),
 };
 
 async function api(path, options) {
@@ -420,6 +442,7 @@ function applyMaterials() {
       o.userData.edgeLines.visible = !wire;
     }
   });
+  requestDraw();
 }
 
 let renderSeq = 0;         // increments per request; responses older than the latest are dropped
@@ -454,6 +477,7 @@ function clearModelUi() {
   document.getElementById('hud').textContent = '—';
   document.getElementById('warns').style.display = 'none';
   document.getElementById('params').innerHTML = '<div class="empty">no render</div>';
+  requestDraw();
 }
 
 async function render({ rebuildPanel = false, frame = false } = {}) {
@@ -491,7 +515,7 @@ async function render({ rebuildPanel = false, frame = false } = {}) {
   }
   hideBanner();
   // Swap only now, so the previous model stays on screen until the new one is ready.
-  clearGroup(modelGroup); modelGroup.rotation.y = 0;
+  clearGroup(modelGroup); pivot.rotation.y = 0;
   if (gltf) { modelGroup.add(gltf.scene); applyMaterials(); }
   lastMeta = meta;
   if (frame) frameModel(meta.bounds);
@@ -728,7 +752,7 @@ tb('btnUp', (e) => { if (e.target.dataset.path) browseFolder(e.target.dataset.pa
 tb('btnUseFolder', () => useBrowseFolder());
 tb('btnFrame', () => frameModel(null));
 tb('btnReset', () => { userValues = {}; render({ rebuildPanel: true, frame: true }); });
-tb('btnGrid', (e) => { grid.visible = toggle(e.target); });
+tb('btnGrid', (e) => { grid.visible = toggle(e.target); requestDraw(); });
 tb('btnPorts', (e) => { showPorts = toggle(e.target); if (lastMeta) drawOverlays(lastMeta); });
 tb('btnDims', (e) => { showDims = toggle(e.target); if (lastMeta) drawOverlays(lastMeta); });
 tb('btnFixedDims', (e) => { showFixedDims = toggle(e.target); if (lastMeta) drawOverlays(lastMeta); });
