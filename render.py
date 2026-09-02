@@ -21,6 +21,12 @@ _SHIM = os.path.join(_HERE, "shim")
 if _SHIM not in sys.path:
     sys.path.insert(0, _SHIM)
 
+# This is a live-reload tool: scripts and their helpers are re-read on every
+# render, sometimes faster than a filesystem mtime can distinguish (CPython's
+# .pyc staleness check truncates to whole seconds). A stale .pyc would then
+# silently keep serving an edited-away version of a helper. Never cache.
+sys.dont_write_bytecode = True
+
 import numpy as np                      # noqa: E402
 import trimesh                          # noqa: E402
 from manifold3d import Manifold         # noqa: E402
@@ -42,17 +48,44 @@ class RenderError(Exception):
     pass
 
 
+def _purge_modules_from(directory):
+    """Drop cached modules whose source lives in `directory`, so that a helper
+    module edited between renders is re-imported. The tool's own directories
+    are never purged."""
+    if directory in (_HERE, _SHIM):
+        return
+    for name, mod in list(sys.modules.items()):
+        f = getattr(mod, "__file__", None)
+        if f and os.path.dirname(os.path.abspath(f)) == directory:
+            del sys.modules[name]
+
+
 def _load_entry(path):
     """Import the script module and return (module, entry_function)."""
     path = os.path.abspath(path)
+    script_dir = os.path.dirname(path)
     stem = os.path.splitext(os.path.basename(path))[0]
     modname = "p3d_script_" + stem
     spec = importlib.util.spec_from_file_location(modname, path)
     if spec is None or spec.loader is None:
         raise RenderError("cannot load %s" % path)
     mod = importlib.util.module_from_spec(spec)
+    _purge_modules_from(script_dir)
     sys.modules[modname] = mod
-    spec.loader.exec_module(mod)
+    # Let the script import helpers that sit next to it, like Plant does when
+    # the folder is on its script path.
+    sys.path.insert(0, script_dir)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        import traceback
+        raise RenderError("script failed to import: %s: %s\n%s" % (
+            type(e).__name__, e, traceback.format_exc()))
+    finally:
+        try:
+            sys.path.remove(script_dir)
+        except ValueError:
+            pass
 
     # Prefer a function whose name matches the filename (Plant's rule).
     fn = getattr(mod, stem, None)

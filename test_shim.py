@@ -119,6 +119,31 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(by_name["D"]["type"], "LENGTH")
         self.assertFalse(by_name["D"]["allow_zero"])
 
+    def test_script_can_import_sibling_helper_and_sees_helper_edits(self):
+        import tempfile
+        from testutil import write_script
+        from render import render_script
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "helper_sizes.py"), "w") as f:
+                f.write("SIZE = 20.0\n")
+            path = write_script(td, "usehelper", """
+                from varmain.primitiv import *
+                from varmain.custom import *
+                from helper_sizes import SIZE
+
+                @activate(Group="Test", LengthUnit="mm")
+                def {stem}(s, **kw):
+                    BOX(s, L=SIZE, W=10.0, H=6.0)
+                """)
+            first = render_script(path)["meta"]["bounds"]
+            # BOX L runs along Plant Y, which the exporter maps to viewer -Z.
+            self.assertAlmostEqual(first["max"][2] - first["min"][2], 20.0, places=5)
+
+            with open(os.path.join(td, "helper_sizes.py"), "w") as f:
+                f.write("SIZE = 40.0\n")
+            second = render_script(path)["meta"]["bounds"]
+            self.assertAlmostEqual(second["max"][2] - second["min"][2], 40.0, places=5)
+
 
 if __name__ == "__main__":
     unittest.main()
