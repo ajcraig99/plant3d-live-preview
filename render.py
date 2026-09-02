@@ -74,6 +74,7 @@ def describe_params(fn):
     ordered list the UI can render."""
     meta = getattr(fn, "_p3d_meta", {}) or {}
     pmeta = meta.get("params", {})
+    enums = meta.get("enums", {})
     sig = inspect.signature(fn)
     out = []
     for i, (name, sp) in enumerate(sig.parameters.items()):
@@ -83,6 +84,9 @@ def describe_params(fn):
             continue
         default = sp.default if sp.default is not inspect.Parameter.empty else 0.0
         info = pmeta.get(name, {})
+        options = enums.get(name)
+        if isinstance(options, dict):
+            options = list(options.keys())
         out.append({
             "name": name,
             "default": default,
@@ -91,6 +95,7 @@ def describe_params(fn):
             "long": info.get("long", ""),
             "allow_negative": info.get("allow_negative", False),
             "allow_zero": info.get("allow_zero", True),
+            "enum": [str(o) for o in options] if options else None,
         })
     return out
 

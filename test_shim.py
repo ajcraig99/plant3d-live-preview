@@ -93,6 +93,32 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(result["meta"]["solid_count"], 1)
         self.assertEqual(result["meta"]["warnings"], [])
 
+    def test_describe_params_surfaces_enum_options_and_typed_defaults(self):
+        result = render_temp_script(
+            "enumpart",
+            """
+            from varmain.primitiv import *
+            from varmain.custom import *
+
+            @activate(Group="Test", LengthUnit="mm")
+            @param(KIND=ENUM, TooltipShort="Kind")
+            @enum(KIND=["A", "B", "C"])
+            @param(FLAG=BOOL, TooltipShort="Flag")
+            @param(TAG=STRING, TooltipShort="Tag")
+            @param(D=LENGTH, TooltipShort="Diameter")
+            def {stem}(s, KIND="A", FLAG=True, TAG="x", D=20.0, **kw):
+                SPHERE(s, R=D / 2.0)
+            """,
+        )
+        by_name = {p["name"]: p for p in result["meta"]["params"]}
+        self.assertEqual(by_name["KIND"]["enum"], ["A", "B", "C"])
+        self.assertEqual(by_name["KIND"]["default"], "A")
+        self.assertIsNone(by_name["D"]["enum"])
+        self.assertIs(by_name["FLAG"]["default"], True)
+        self.assertEqual(by_name["TAG"]["default"], "x")
+        self.assertEqual(by_name["D"]["type"], "LENGTH")
+        self.assertFalse(by_name["D"]["allow_zero"])
+
 
 if __name__ == "__main__":
     unittest.main()
