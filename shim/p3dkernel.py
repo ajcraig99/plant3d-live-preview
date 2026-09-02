@@ -47,7 +47,8 @@ class Scene:
     the script's entry function. Owns every solid created during a run and
     collects the ports / dimensions the script declares."""
 
-    def __init__(self):
+    def __init__(self, segments=None):
+        self.segments = int(segments) if segments else SEGMENTS
         self.solids = []        # every Solid ever created, in creation order
         self.points = []        # {'pos':(x,y,z), 'dir':(dx,dy,dz), 'extra':(...)}
         self.dims = []          # {'name':str, 'a':(x,y,z), 'b':(x,y,z)}
@@ -187,36 +188,36 @@ def CYLINDER(s, R=None, H=1.0, O=0.0, R1=None, R2=None, **kw):
     if R is None and R1 is not None:
         low = float(R1)
         high = float(R2) if R2 is not None else float(R1)
-        outer = Manifold.cylinder(H, low, high, SEGMENTS, False)
+        outer = Manifold.cylinder(H, low, high, s.segments, False)
     else:
         r = float(R if R is not None else (R1 if R1 is not None else 1.0))
-        outer = Manifold.cylinder(H, r, r, SEGMENTS, False)
+        outer = Manifold.cylinder(H, r, r, s.segments, False)
     O = float(O or 0.0)
     if O > 0.0:
-        bore = Manifold.cylinder(H + 2 * _EPS, O, O, SEGMENTS, False).translate((0, 0, -_EPS))
+        bore = Manifold.cylinder(H + 2 * _EPS, O, O, s.segments, False).translate((0, 0, -_EPS))
         outer = outer - bore
     return _finish(s, "CYLINDER", outer, {"R": R, "H": H, "O": O, "R1": R1, "R2": R2})
 
 
 def CONE(s, R1=1.0, R2=0.0, H=1.0, E=0.0, **kw):
     # E (eccentricity) is 0.0 everywhere in the repo; concentric cone.
-    return _finish(s, "CONE", Manifold.cylinder(float(H), float(R1), float(R2), SEGMENTS, False),
+    return _finish(s, "CONE", Manifold.cylinder(float(H), float(R1), float(R2), s.segments, False),
                    {"R1": R1, "R2": R2, "H": H})
 
 
 def TORUS(s, R1=1.0, R2=0.5, **kw):
     # Ring radius R1, tube radius R2. Revolve a circle; manifold's revolve puts
     # the resulting axis on Z, matching Plant's TORUS (ring in XY plane).
-    circle = CrossSection.circle(float(R2), SEGMENTS).translate((float(R1), 0.0))
-    return _finish(s, "TORUS", Manifold.revolve(circle, SEGMENTS, 360.0), {"R1": R1, "R2": R2})
+    circle = CrossSection.circle(float(R2), s.segments).translate((float(R1), 0.0))
+    return _finish(s, "TORUS", Manifold.revolve(circle, s.segments, 360.0), {"R1": R1, "R2": R2})
 
 
 def SPHERE(s, R=1.0, **kw):
-    return _finish(s, "SPHERE", Manifold.sphere(float(R), SEGMENTS), {"R": R})
+    return _finish(s, "SPHERE", Manifold.sphere(float(R), s.segments), {"R": R})
 
 
 def HALFSPHERE(s, R=1.0, **kw):
-    sph = Manifold.sphere(float(R), SEGMENTS)
+    sph = Manifold.sphere(float(R), s.segments)
     # keep the +Z half
     box = Manifold.cube([4 * float(R), 4 * float(R), 4 * float(R)], True).translate((0, 0, 2 * float(R)))
     return _finish(s, "HALFSPHERE", sph ^ box, {"R": R})
@@ -226,6 +227,6 @@ def ELLIPSOIDHEAD(s, R=1.0, H=None, **kw):
     # Approximate a 2:1 ellipsoidal head as a squashed half-sphere.
     r = float(R)
     h = float(H) if H is not None else r / 2.0
-    sph = Manifold.sphere(r, SEGMENTS)
+    sph = Manifold.sphere(r, s.segments)
     box = Manifold.cube([4 * r, 4 * r, 4 * r], True).translate((0, 0, 2 * r))
     return _finish(s, "ELLIPSOIDHEAD", (sph ^ box).scale((1.0, 1.0, h / r)), {"R": R, "H": h})

@@ -143,10 +143,12 @@ def _mesh_to_trimesh(m, color):
     return tm
 
 
-def render_script(path, params=None):
+def render_script(path, params=None, segments=None):
     """Run the script and return a dict with keys:
         glb   : bytes (GLB) or None if empty
         meta  : dict (params schema, values used, ports, dims, warnings, bounds)
+    `segments` overrides the facet count for round primitives (default from
+    P3D_SEGMENTS env, else 96).
     Raises RenderError on load/exec failure (message is user-facing)."""
     mod, fn = _load_entry(path)
     schema = describe_params(fn)
@@ -156,7 +158,7 @@ def render_script(path, params=None):
             if k in values:
                 values[k] = v
 
-    s = Scene()
+    s = Scene(segments=segments)
     try:
         fn(s, **values)
     except Exception as e:
@@ -196,6 +198,7 @@ def render_script(path, params=None):
         "warnings": s.warnings,
         "solid_count": len(live),
         "bounds": bounds,
+        "segments": s.segments,
     }
     return {"glb": glb, "meta": meta}
 

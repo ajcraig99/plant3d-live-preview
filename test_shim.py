@@ -144,6 +144,21 @@ class ShimTests(unittest.TestCase):
             second = render_script(path)["meta"]["bounds"]
             self.assertAlmostEqual(second["max"][2] - second["min"][2], 40.0, places=5)
 
+    def test_segments_argument_controls_mesh_density(self):
+        src = """
+            from varmain.primitiv import *
+            from varmain.custom import *
+
+            @activate(Group="Test", LengthUnit="mm")
+            def {stem}(s, **kw):
+                CYLINDER(s, R=10.0, H=20.0)
+            """
+        coarse = render_temp_script("segcyl", src, segments=16)
+        fine = render_temp_script("segcyl", src, segments=96)
+        self.assertEqual(coarse["meta"]["segments"], 16)
+        self.assertEqual(fine["meta"]["segments"], 96)
+        self.assertLess(len(coarse["glb"]), len(fine["glb"]))
+
 
 if __name__ == "__main__":
     unittest.main()
