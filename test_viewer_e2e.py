@@ -129,6 +129,47 @@ class ViewerE2E(unittest.TestCase):
         self.assertEqual(self.hook("lastMeta().solid_count"), 1)
         self.assertEqual(self.page_errors, [])
 
+    def test_stale_render_response_is_discarded(self):
+        self.open()
+        real = server.R.render_script
+
+        def slow_for_100(path, params=None, **kw):
+            if params and params.get("L") == 100:
+                time.sleep(1.5)
+            return real(path, params, **kw)
+
+        num = self.number_input("L")
+        with mock.patch.object(server.R, "render_script", slow_for_100):
+            num.fill("100")
+            self.page.wait_for_timeout(300)   # debounce fires -> slow request in flight
+            num.fill("200")
+            self.page.wait_for_timeout(2500)  # both responses have arrived
+        self.assertEqual(self.hook("lastMeta().values.L"), 200)
+
+    def test_overlay_toggles_do_not_rerender_on_the_server(self):
+        self.open()
+        before = self.hook("renderCount()")
+        with_ports = self.hook("overlayCount()")
+        self.page.click("#btnPorts")
+        self.page.wait_for_timeout(300)
+        self.assertEqual(self.hook("renderCount()"), before)
+        self.assertLess(self.hook("overlayCount()"), with_ports)
+        self.page.click("#btnPorts")
+        self.page.wait_for_timeout(300)
+        self.assertEqual(self.hook("overlayCount()"), with_ports)
+        self.assertEqual(self.hook("renderCount()"), before)
+
+    def test_error_clears_panel_and_hud(self):
+        write_script(self.scripts_dir, "broken", BROKEN)
+        self.open()
+        self.page.wait_for_function("document.querySelectorAll('.item').length === 3", timeout=10000)
+        self.click_script("broken.py")
+        self.page.wait_for_selector("#banner", state="visible")
+        self.assertIn("boom from the script", self.page.text_content("#banner"))
+        self.assertEqual(self.page.text_content("#hud").strip(), "—")
+        self.assertEqual(self.page.locator(".prow").count(), 0)
+        self.assertIn("no render", self.page.text_content("#params"))
+
 
 if __name__ == "__main__":
     unittest.main()

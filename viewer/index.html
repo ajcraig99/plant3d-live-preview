@@ -421,59 +421,81 @@ function applyMaterials() {
   });
 }
 
-async function render({ rebuildPanel = false, frame = false } = {}) {
-  if (!currentScript) return;
-  // Always send only explicit overrides so untouched params follow the file's
-  // current defaults (important for live-reload after editing a default).
-  renderCount++;
-  const url = `/api/render?script=${encodeURIComponent(currentScript)}&params=${encodeURIComponent(JSON.stringify(userValues))}`;
-  let data;
-  try {
-    data = await api(url);
-  } catch (err) {
-    const banner = document.getElementById('banner');
-    banner.style.display = 'block';
-    banner.textContent = String(err.message || err);
-    return;
-  }
+let renderSeq = 0;         // increments per request; responses older than the latest are dropped
+
+function showBanner(text) {
   const banner = document.getElementById('banner');
-  if (data.error) {
-    banner.style.display = 'block';
-    banner.textContent = `⚠ ${currentScript}\n${data.error}`;
-    return;
-  }
-  banner.style.display = 'none';
-  const meta = data.meta;
+  banner.style.display = 'block';
+  banner.textContent = text;
+}
+function hideBanner() { document.getElementById('banner').style.display = 'none'; }
 
-  // geometry
-  clearGroup(modelGroup); modelGroup.rotation.y = 0;
-  if (data.glb_b64) {
-    loader.parse(b64ToBuf(data.glb_b64), '', (gltf) => {
-      modelGroup.add(gltf.scene);
-      applyMaterials();
-      if (frame) frameModel(meta.bounds);
-      drawOverlays(meta);
-    }, (err) => {
-      document.getElementById('banner').style.display = 'block';
-      document.getElementById('banner').textContent = 'GLB load error: ' + err;
-    });
-  } else {
-    drawOverlays(meta);
-  }
+function parseGlb(b64) {
+  return new Promise((resolve, reject) => loader.parse(b64ToBuf(b64), '', resolve, reject));
+}
 
-  // hud
+function showMeta(meta) {
   const unit = (meta.activate && meta.activate.LengthUnit) || 'mm';
   document.getElementById('hud').textContent =
     `${meta.entry}()  ·  ${meta.solid_count} solid(s)  ·  ${meta.ports.length} port(s)  ·  ${unit}`;
-
-  // warnings
   const warns = document.getElementById('warns');
   if (meta.warnings && meta.warnings.length) {
     warns.style.display = 'block';
     warns.textContent = '⚠ ' + meta.warnings.join('\n⚠ ');
   } else warns.style.display = 'none';
+}
 
+// Called when a script fails to render: nothing on screen may describe the
+// previous script any more, or its sliders would send overrides to this one.
+function clearModelUi() {
+  clearGroup(modelGroup); clearGroup(overlay);
+  lastMeta = null;
+  document.getElementById('hud').textContent = '—';
+  document.getElementById('warns').style.display = 'none';
+  document.getElementById('params').innerHTML = '<div class="empty">no render</div>';
+}
+
+async function render({ rebuildPanel = false, frame = false } = {}) {
+  if (!currentScript) return;
+  const script = currentScript;
+  const seq = ++renderSeq;
+  renderCount++;
+  // Always send only explicit overrides so untouched params follow the file's
+  // current defaults (important for live-reload after editing a default).
+  const url = `/api/render?script=${encodeURIComponent(script)}&params=${encodeURIComponent(JSON.stringify(userValues))}`;
+  let data;
+  try {
+    data = await api(url);
+  } catch (err) {
+    if (seq !== renderSeq) return;
+    showBanner(String(err.message || err));
+    return;
+  }
+  if (seq !== renderSeq) return;   // a newer request superseded this one; drop the stale response
+  if (data.error) {
+    showBanner(`⚠ ${script}\n${data.error}`);
+    if (rebuildPanel) clearModelUi();
+    return;
+  }
+  const meta = data.meta;
+  let gltf = null;
+  if (data.glb_b64) {
+    try {
+      gltf = await parseGlb(data.glb_b64);
+    } catch (err) {
+      showBanner('GLB load error: ' + err);
+      return;
+    }
+    if (seq !== renderSeq) return;
+  }
+  hideBanner();
+  // Swap only now, so the previous model stays on screen until the new one is ready.
+  clearGroup(modelGroup); modelGroup.rotation.y = 0;
+  if (gltf) { modelGroup.add(gltf.scene); applyMaterials(); }
   lastMeta = meta;
+  if (frame) frameModel(meta.bounds);
+  drawOverlays(meta);
+  showMeta(meta);
   if (rebuildPanel) buildPanel(meta);
   return meta;
 }
@@ -544,9 +566,7 @@ async function loadList({ preferCurrent = false } = {}) {
   const list = document.getElementById('scriptlist'); list.innerHTML = '';
   if (!scripts.length) {
     currentScript = null;
-    clearGroup(modelGroup); clearGroup(overlay);
-    document.getElementById('params').innerHTML = '<div class="empty">no scripts found</div>';
-    document.getElementById('hud').textContent = '—';
+    clearModelUi();
     list.innerHTML = '<div class="empty">no scripts found</div>';
     return;
   }
@@ -681,9 +701,9 @@ tb('btnUseFolder', () => useBrowseFolder());
 tb('btnFrame', () => frameModel(null));
 tb('btnReset', () => { userValues = {}; render({ rebuildPanel: true, frame: true }); });
 tb('btnGrid', (e) => { grid.visible = toggle(e.target); });
-tb('btnPorts', (e) => { showPorts = toggle(e.target); render(); });
-tb('btnDims', (e) => { showDims = toggle(e.target); render(); });
-tb('btnFixedDims', (e) => { showFixedDims = toggle(e.target); render(); });
+tb('btnPorts', (e) => { showPorts = toggle(e.target); if (lastMeta) drawOverlays(lastMeta); });
+tb('btnDims', (e) => { showDims = toggle(e.target); if (lastMeta) drawOverlays(lastMeta); });
+tb('btnFixedDims', (e) => { showFixedDims = toggle(e.target); if (lastMeta) drawOverlays(lastMeta); });
 tb('btnWire', (e) => { wire = toggle(e.target); applyMaterials(); });
 tb('btnSpin', (e) => { spin = toggle(e.target); });
 addEventListener('resize', resize);
