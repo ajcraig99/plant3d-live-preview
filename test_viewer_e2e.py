@@ -73,13 +73,15 @@ class ViewerE2E(unittest.TestCase):
         cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         cls.url = "http://127.0.0.1:%d/" % cls.httpd.server_address[1]
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
-        threading.Thread(target=server.watcher, daemon=True).start()
+        cls.watch_stop = threading.Event()
+        threading.Thread(target=server.watcher, kwargs={"stop": cls.watch_stop}, daemon=True).start()
         cls.pw = sync_playwright().start()
         cls.browser = cls.pw.chromium.launch(
             args=["--use-gl=angle", "--use-angle=swiftshader-webgl"])
 
     @classmethod
     def tearDownClass(cls):
+        cls.watch_stop.set()
         cls.browser.close()
         cls.pw.stop()
         cls.httpd.shutdown()
@@ -272,6 +274,11 @@ class ViewerE2E(unittest.TestCase):
         self.page.click("#btnReset")
         self.page.wait_for_function("!location.hash.includes('p=')", timeout=10000)
 
+    def test_hash_with_non_object_params_is_ignored(self):
+        self.open("#p=%5B1%2C2%5D")
+        self.assertEqual(self.hook("userValues()"), {})
+        self.assertEqual(self.hook("paramString()"), "render.py customsupports/block.py")
+
     def test_hud_shows_render_time(self):
         self.open()
         self.assertRegex(self.page.text_content("#hud"), r"\d+(\.\d+)? ms")
@@ -322,6 +329,7 @@ class ViewerE2E(unittest.TestCase):
         self.assertIn("Δ=", self.page.text_content("#hud"))
         self.page.click("#btnMeasure")
         self.assertEqual(self.hook("measureCount()"), 0)
+        self.assertNotIn("Δ=", self.page.text_content("#hud"))
 
 
 if __name__ == "__main__":

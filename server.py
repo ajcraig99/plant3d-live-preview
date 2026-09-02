@@ -42,6 +42,7 @@ _watch_lock = threading.Lock()
 _watch_cond = threading.Condition(_watch_lock)   # notifies SSE streams instantly
 _last_changed = ""
 ALLOW_ROOT_CHANGE = True   # main() turns this off for non-loopback binds
+_MAX_BODY = 1_000_000      # bytes; the only POST body is a short JSON object
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
@@ -162,6 +163,8 @@ def _root_changes_allowed(host, allow_remote_root):
 
 def _browser_url(host, port):
     open_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    if ":" in open_host:            # bare IPv6 literal needs brackets in a URL
+        open_host = "[%s]" % open_host
     return "http://%s:%d/" % (open_host, port)
 
 
@@ -206,12 +209,17 @@ def _set_root(path):
     _notify("__root__")
 
 
-def watcher():
-    """Poll scripts; notify clients about edits, additions, and deletions."""
+_watch_stop = threading.Event()   # set to end the watcher thread (tests do this)
+
+
+def watcher(stop=None):
+    """Poll scripts; notify clients about edits, additions, and deletions.
+    Runs until `stop` (a threading.Event, default the module-level one) is set."""
+    stop = stop if stop is not None else _watch_stop
     mtimes = _snapshot()[1]
-    while True:
+    while not stop.is_set():
         mtimes = _watch_poll(mtimes)
-        time.sleep(0.3)
+        stop.wait(0.3)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -283,6 +291,8 @@ class Handler(BaseHTTPRequestHandler):
         """Parse the JSON body. Raises ValueError (which JSONDecodeError
         subclasses) when the body is not a JSON object."""
         length = int(self.headers.get("Content-Length") or 0)
+        if length < 0 or length > _MAX_BODY:
+            raise ValueError("Content-Length must be between 0 and %d" % _MAX_BODY)
         raw = self.rfile.read(length) if length else b""
         payload = json.loads(raw or b"{}")
         if not isinstance(payload, dict):

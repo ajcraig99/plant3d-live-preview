@@ -81,6 +81,15 @@ class StaticAndBodyTests(ServerTestCase):
         self.assertEqual(status, 400)
         self.assertIn("object", json.loads(data)["error"])
 
+    def test_post_root_with_bad_content_length_is_400_not_a_hang(self):
+        for bad in ("-1", str(server._MAX_BODY + 1)):
+            with self.subTest(content_length=bad):
+                status, data = self.request(
+                    "POST", "/api/root", body=b"",
+                    headers={"Content-Type": "application/json", "Content-Length": bad})
+                self.assertEqual(status, 400)
+                self.assertIn("Content-Length", json.loads(data)["error"])
+
     def test_post_root_with_invalid_json_is_400(self):
         status, _ = self.post_raw("/api/root", b"{not json")
         self.assertEqual(status, 400)
@@ -141,6 +150,7 @@ class MainTests(unittest.TestCase):
         self.assertEqual(server._browser_url("0.0.0.0", 8770), "http://127.0.0.1:8770/")
         self.assertEqual(server._browser_url("::", 8770), "http://127.0.0.1:8770/")
         self.assertEqual(server._browser_url("192.168.1.5", 8770), "http://192.168.1.5:8770/")
+        self.assertEqual(server._browser_url("::1", 8770), "http://[::1]:8770/")
 
     def test_root_changes_disabled_for_non_loopback_hosts(self):
         self.assertTrue(server._root_changes_allowed("127.0.0.1", False))
