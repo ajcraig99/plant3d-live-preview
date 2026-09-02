@@ -218,6 +218,15 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass  # quiet
 
+    def handle(self):
+        # A browser dropping a keep-alive connection (tab refresh, SSE close)
+        # raises here while the stdlib waits for the next request line. That
+        # is routine, not an error, so don't let socketserver print a traceback.
+        try:
+            super().handle()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
+
     # -- helpers -------------------------------------------------------------
     def _send(self, code, body, ctype="application/json"):
         if isinstance(body, str):
