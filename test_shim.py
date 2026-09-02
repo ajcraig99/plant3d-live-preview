@@ -23,6 +23,39 @@ class ShimTests(unittest.TestCase):
         self.assertEqual(result["meta"]["solid_count"], 1)
         self.assertTrue(result["glb"])
 
+    def test_unmodelled_primitive_via_star_import_draws_placeholder(self):
+        result = render_temp_script(
+            "arcpart",
+            """
+            from varmain.primitiv import *
+            from varmain.custom import *
+
+            @activate(Group="Test", LengthUnit="mm")
+            def {stem}(s, **kw):
+                ARC3D(s, R=50.0, A=90.0)
+            """,
+        )
+        meta = result["meta"]
+        self.assertEqual(meta["solid_count"], 1)
+        self.assertEqual(len(meta["warnings"]), 1)
+        self.assertIn("ARC3D", meta["warnings"][0])
+        self.assertIn("placeholder", meta["warnings"][0])
+
+    def test_star_import_does_not_leak_manifold_class(self):
+        with self.assertRaises(Exception) as ctx:
+            render_temp_script(
+                "leakcheck",
+                """
+                from varmain.primitiv import *
+                from varmain.custom import *
+
+                @activate(Group="Test", LengthUnit="mm")
+                def {stem}(s, **kw):
+                    Manifold.cube([1, 1, 1], True)
+                """,
+            )
+        self.assertIn("NameError", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

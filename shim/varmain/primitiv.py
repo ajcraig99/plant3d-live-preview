@@ -29,6 +29,14 @@ _UNMODELLED = {
     "EQHALFSPHERE", "CDBOX", "CDCYLINDER",
 }
 
+_MODELLED = ["Solid", "BOX", "CYLINDER", "CONE", "TORUS", "SPHERE", "HALFSPHERE", "ELLIPSOIDHEAD"]
+
+# `from varmain.primitiv import *` only sees names in __all__. Listing the
+# unmodelled names here makes star import call __getattr__ below for each of
+# them, so scripts get the placeholder instead of a NameError. `Manifold` is
+# deliberately not exported.
+__all__ = _MODELLED + sorted(_UNMODELLED)
+
 
 def __getattr__(name):
     if name in _UNMODELLED or name.isupper():
