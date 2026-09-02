@@ -222,6 +222,32 @@ class ViewerE2E(unittest.TestCase):
         self.assertGreater(self.hook("pivotRotationY()"), 0)
         self.page.click("#btnSpin")
 
+    def test_metadata_is_rendered_as_text_not_html(self):
+        self.open()
+        self.assertEqual(self.page.text_content(".meta-line b"), "<b>Plate</b>")
+        self.assertEqual(self.page.locator(".meta-line b b").count(), 0)
+
+    def test_enum_and_bool_params_get_typed_controls(self):
+        write_script(self.scripts_dir, "enumpart", ENUMPART)
+        self.open()
+        self.page.wait_for_function("document.querySelectorAll('.item').length === 3", timeout=10000)
+        self.click_script("enumpart.py")
+        self.page.wait_for_function("window.__p3d.lastMeta().entry === 'enumpart'", timeout=10000)
+        kind = self.row("KIND").locator("select")
+        self.assertEqual(kind.locator("option").count(), 2)
+        kind.select_option("B")
+        self.page.wait_for_function("window.__p3d.lastMeta().values.KIND === 'B'", timeout=10000)
+        flag = self.row("FLAG").locator("input[type=checkbox]")
+        self.assertTrue(flag.is_checked())
+        flag.uncheck()
+        self.page.wait_for_function("window.__p3d.lastMeta().values.FLAG === false", timeout=10000)
+        self.assertEqual(self.row("D").locator("input[type=range]").count(), 1)
+
+    def test_length_slider_cannot_reach_zero(self):
+        self.open()
+        rng = self.row("L").locator("input[type=range]")
+        self.assertGreater(float(rng.get_attribute("min")), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

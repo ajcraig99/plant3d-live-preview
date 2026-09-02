@@ -77,6 +77,9 @@
   .prow input[type=range] { flex: 1; accent-color: var(--accent); }
   .prow input[type=number] { width: 74px; background: var(--bg); color: var(--fg);
     border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; font-family: var(--mono); font-size: 12px; }
+  .prow select, .prow input[type=text] { flex: 1; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; font-family: var(--mono); font-size: 12px; }
+  .prow input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
   .meta-line { padding: 8px 12px; color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--panel2); }
   .meta-line b { color: var(--fg); font-weight: 600; }
   .foot { padding: 8px 12px; color: var(--muted); font-size: 10px; }
@@ -530,50 +533,85 @@ function scheduleRender() {
   debounceTimer = setTimeout(() => render(), 120);
 }
 
+function el(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
+
 function buildPanel(meta) {
   const panel = document.getElementById('params');
   panel.innerHTML = '';
-  const grp = (meta.activate && meta.activate.Group) || '—';
-  const tip = (meta.activate && meta.activate.TooltipLong) || '';
-  const info = document.createElement('div'); info.className = 'meta-line';
-  info.innerHTML = `<b>${meta.activate.TooltipShort || meta.entry}</b> · group “${grp}”` + (tip ? `<br><span style="color:var(--muted)">${tip}</span>` : '');
+  const act = meta.activate || {};
+  const info = el('div', 'meta-line');
+  const b = el('b'); b.textContent = act.TooltipShort || meta.entry;
+  info.append(b, ` · group “${act.Group || '—'}”`);
+  if (act.TooltipLong) {
+    info.appendChild(el('br'));
+    const t = el('span'); t.style.color = 'var(--muted)'; t.textContent = act.TooltipLong;
+    info.appendChild(t);
+  }
   panel.appendChild(info);
-
   currentValues = Object.assign({}, meta.values);
+  meta.params.forEach(p => panel.appendChild(buildParamRow(p)));
+}
 
-  meta.params.forEach(p => {
-    // effective value: user override if present, otherwise the file's default
-    const v = (p.name in userValues) ? userValues[p.name] : p.default;
-    currentValues[p.name] = v;
-    const row = document.createElement('div'); row.className = 'prow';
+function buildParamRow(p) {
+  // effective value: user override if present, otherwise the file's default
+  const v = (p.name in userValues) ? userValues[p.name] : p.default;
+  currentValues[p.name] = v;
+  const row = el('div', 'prow');
+  const lbl = el('div', 'lbl');
+  const name = el('span', 'name');
+  const code = el('span', 'code'); code.textContent = p.name; name.appendChild(code);
+  if (p.short && p.short !== p.name) name.append(' · ' + p.short);
+  const tt = el('span', 'tt'); tt.textContent = p.type;
+  lbl.append(name, tt); row.appendChild(lbl);
+  const controls = el('div', 'controls'); row.appendChild(controls);
+  const commit = (val) => { currentValues[p.name] = val; userValues[p.name] = val; scheduleRender(); };
+
+  const isBool = p.type === 'BOOL' || p.type === 'BOOLEAN' || p.type === 'b' || typeof v === 'boolean';
+  const isText = p.type === 'STRING' || (typeof v === 'string' && isNaN(parseFloat(v)));
+  if (p.enum && p.enum.length) {
+    const sel = el('select');
+    p.enum.forEach(o => {
+      const opt = el('option'); opt.value = o; opt.textContent = o;
+      if (String(o) === String(v)) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    // Send a number when the option is numeric and the default was numeric; else a string.
+    sel.addEventListener('change', () => {
+      const s = sel.value;
+      commit(typeof p.default === 'number' && s.trim() !== '' && !isNaN(+s) ? +s : s);
+    });
+    controls.appendChild(sel);
+  } else if (isBool) {
+    const cb = el('input'); cb.type = 'checkbox'; cb.checked = !!v && v !== '0';
+    cb.addEventListener('change', () => commit(cb.checked));
+    controls.appendChild(cb);
+  } else if (isText) {
+    const txt = el('input'); txt.type = 'text'; txt.value = v;
+    txt.addEventListener('input', () => commit(txt.value));
+    controls.appendChild(txt);
+  } else {
     const isInt = p.type === 'INT' || p.type === 'INTEGER';
-    const step = isInt ? 1 : 'any';
-    const sliderMax = Math.max(Math.abs(v) * 3, Math.abs(v) + 50, 10);
-    const sliderMin = p.allow_negative ? -sliderMax : 0;
-    row.innerHTML = `
-      <div class="lbl">
-        <span class="name"><span class="code">${p.name}</span> ${p.short && p.short !== p.name ? '· ' + p.short : ''}</span>
-        <span class="tt">${p.type}</span>
-      </div>
-      <div class="controls">
-        <input type="range" min="${sliderMin}" max="${sliderMax}" step="${isInt ? 1 : sliderMax / 200}" value="${v}">
-        <input type="number" step="${step}" value="${v}">
-      </div>
-      ${p.long ? `<div class="tt" style="margin-top:4px">${p.long}</div>` : ''}`;
-    const [range, num] = row.querySelectorAll('input');
+    const num = parseFloat(v) || 0;
+    const sliderMax = Math.max(Math.abs(num) * 3, Math.abs(num) + 50, 10);
+    const fineStep = isInt ? 1 : sliderMax / 200;
+    // LENGTH (allow_zero false) must not be able to hit 0: that yields empty geometry.
+    const sliderMin = p.allow_negative ? -sliderMax : (p.allow_zero ? 0 : fineStep);
+    const range = el('input'); range.type = 'range';
+    range.min = sliderMin; range.max = sliderMax; range.step = fineStep; range.value = num;
+    const nbox = el('input'); nbox.type = 'number'; nbox.step = isInt ? 1 : 'any'; nbox.value = num;
+    controls.append(range, nbox);
     const set = (val, from) => {
       let f = parseFloat(val); if (isNaN(f)) return;
       if (isInt) f = Math.round(f);
-      currentValues[p.name] = f;
-      userValues[p.name] = f;
       if (from !== 'range') { if (f > +range.max) range.max = f; if (f < +range.min) range.min = f; range.value = f; }
-      if (from !== 'num') num.value = f;
-      scheduleRender();
+      if (from !== 'num') nbox.value = f;
+      commit(f);
     };
     range.addEventListener('input', () => set(range.value, 'range'));
-    num.addEventListener('input', () => set(num.value, 'num'));
-    panel.appendChild(row);
-  });
+    nbox.addEventListener('input', () => set(nbox.value, 'num'));
+  }
+  if (p.long) { const l = el('div', 'tt'); l.style.marginTop = '4px'; l.textContent = p.long; row.appendChild(l); }
+  return row;
 }
 
 const dirOf = (p) => p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
