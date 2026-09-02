@@ -272,6 +272,26 @@ class ViewerE2E(unittest.TestCase):
         self.page.click("#btnReset")
         self.page.wait_for_function("!location.hash.includes('p=')", timeout=10000)
 
+    def test_hud_shows_render_time(self):
+        self.open()
+        self.assertRegex(self.page.text_content("#hud"), r"\d+(\.\d+)? ms")
+
+    def test_traceback_lines_from_the_script_are_highlighted(self):
+        write_script(self.scripts_dir, "broken", BROKEN)
+        self.open()
+        self.page.wait_for_function("document.querySelectorAll('.item').length === 3", timeout=10000)
+        self.click_script("broken.py")
+        self.page.wait_for_selector("#banner .hl", state="visible", timeout=10000)
+        self.assertIn("broken.py", self.page.text_content("#banner .hl"))
+
+    def test_param_string_and_export_are_available(self):
+        self.open()
+        self.number_input("L").fill("88")
+        self.page.wait_for_function("window.__p3d.lastMeta().values.L === 88", timeout=10000)
+        self.assertEqual(self.hook("paramString()"), "render.py customsupports/block.py -p L=88")
+        self.assertEqual(self.hook("exportName()"), "block.glb")
+        self.assertFalse(self.page.locator("#btnExport").is_disabled())
+
 
 if __name__ == "__main__":
     unittest.main()

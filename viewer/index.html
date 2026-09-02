@@ -62,6 +62,7 @@
     background: rgba(255,107,107,.12); border: 1px solid var(--err); color: #ffd4d4;
     padding: 8px 10px; border-radius: 6px; font-family: var(--mono); font-size: 11px;
     white-space: pre-wrap; max-height: 40%; overflow: auto; display: none; }
+  #banner .hl { background: rgba(255,107,107,.22); color: #fff; }
   #warns { position: absolute; bottom: 132px; right: 10px; max-width: 45%;
     font-family: var(--mono); font-size: 11px; color: var(--warn);
     background: rgba(224,168,74,.10); border: 1px solid var(--warn); border-radius: 6px;
@@ -121,6 +122,8 @@
         <button class="btn" id="btnFixedDims">Fixed dims</button>
         <button class="btn" id="btnWire">Wireframe</button>
         <button class="btn" id="btnSpin">Spin</button>
+        <button class="btn" id="btnExport" title="Download the current mesh as .glb">Export GLB</button>
+        <button class="btn" id="btnCopy" title="Copy a render.py command line with your overrides">Copy params</button>
       </div>
       <div id="banner"></div>
       <div id="warns"></div>
@@ -390,6 +393,7 @@ window.__p3d = {
   resizeCount: () => resizeCount,
   pivotRotationY: () => pivot.rotation.y,
   overlayShareSpinPivot: () => pivot.children.includes(modelGroup) && pivot.children.includes(overlay),
+  paramString, exportName,
 };
 
 // ---- URL hash state: #script=REL&p={"D":300} ---------------------------------
@@ -470,7 +474,16 @@ let renderSeq = 0;         // increments per request; responses older than the l
 function showBanner(text) {
   const banner = document.getElementById('banner');
   banner.style.display = 'block';
-  banner.textContent = text;
+  banner.textContent = '';
+  // Highlight traceback lines that point into the current script so the
+  // offending line stands out from the shim frames.
+  const stem = currentScript ? currentScript.slice(currentScript.lastIndexOf('/') + 1) : null;
+  String(text).split('\n').forEach((line, i) => {
+    const span = document.createElement('span');
+    span.textContent = (i ? '\n' : '') + line;
+    if (stem && line.includes('File "') && line.includes(stem)) span.className = 'hl';
+    banner.appendChild(span);
+  });
 }
 function hideBanner() { document.getElementById('banner').style.display = 'none'; }
 
@@ -480,8 +493,9 @@ function parseGlb(b64) {
 
 function showMeta(meta) {
   const unit = (meta.activate && meta.activate.LengthUnit) || 'mm';
+  const ms = typeof meta.elapsed_ms === 'number' ? `  ·  ${meta.elapsed_ms} ms` : '';
   document.getElementById('hud').textContent =
-    `${meta.entry}()  ·  ${meta.solid_count} solid(s)  ·  ${meta.ports.length} port(s)  ·  ${unit}`;
+    `${meta.entry}()  ·  ${meta.solid_count} solid(s)  ·  ${meta.ports.length} port(s)  ·  ${unit}${ms}`;
   const warns = document.getElementById('warns');
   if (meta.warnings && meta.warnings.length) {
     warns.style.display = 'block';
@@ -497,7 +511,34 @@ function clearModelUi() {
   document.getElementById('hud').textContent = '—';
   document.getElementById('warns').style.display = 'none';
   document.getElementById('params').innerHTML = '<div class="empty">no render</div>';
+  lastGlbB64 = null; document.getElementById('btnExport').disabled = true;
   requestDraw();
+}
+
+let lastGlbB64 = null;    // kept for Export GLB
+
+function exportName() {
+  if (!currentScript) return 'model.glb';
+  const stem = currentScript.slice(currentScript.lastIndexOf('/') + 1).replace(/\.py$/, '');
+  return stem + '.glb';
+}
+function paramString() {
+  if (!currentScript) return '';
+  const parts = Object.entries(userValues).map(([k, v]) => `${k}=${typeof v === 'string' ? JSON.stringify(v) : v}`);
+  return `render.py ${currentScript}` + (parts.length ? ' -p ' + parts.join(' ') : '');
+}
+function downloadGlb() {
+  if (!lastGlbB64) return;
+  const blob = new Blob([b64ToBuf(lastGlbB64)], { type: 'model/gltf-binary' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = exportName();
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+async function copyParams() {
+  const s = paramString();
+  try { await navigator.clipboard.writeText(s); }
+  catch (_) { window.prompt('Copy this command line:', s); }
 }
 
 async function render({ rebuildPanel = false, frame = false } = {}) {
@@ -538,6 +579,7 @@ async function render({ rebuildPanel = false, frame = false } = {}) {
   clearGroup(modelGroup); pivot.rotation.y = 0;
   if (gltf) { modelGroup.add(gltf.scene); applyMaterials(); }
   lastMeta = meta;
+  lastGlbB64 = data.glb_b64 || null; document.getElementById('btnExport').disabled = !lastGlbB64;
   if (frame) frameModel(meta.bounds);
   drawOverlays(meta);
   showMeta(meta);
@@ -818,5 +860,7 @@ tb('btnDims', (e) => { showDims = toggle(e.target); if (lastMeta) drawOverlays(l
 tb('btnFixedDims', (e) => { showFixedDims = toggle(e.target); if (lastMeta) drawOverlays(lastMeta); });
 tb('btnWire', (e) => { wire = toggle(e.target); applyMaterials(); });
 tb('btnSpin', (e) => { spin = toggle(e.target); });
+tb('btnExport', () => downloadGlb());
+tb('btnCopy', () => copyParams());
 addEventListener('resize', resize);
 </script>
