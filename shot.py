@@ -2,7 +2,7 @@ import asyncio, sys
 from playwright.async_api import async_playwright
 
 SCRIPT = sys.argv[1] if len(sys.argv) > 1 else "guide.py"
-OUT = sys.argv[2] if len(sys.argv) > 2 else "/tmp/pw_shot.png"
+OUT = sys.argv[2] if len(sys.argv) > 2 else "pw_shot.png"   # written to the current directory
 
 async def main():
     async with async_playwright() as p:

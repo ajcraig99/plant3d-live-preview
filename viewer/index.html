@@ -51,6 +51,7 @@
   #stage { position: relative; flex: 1; min-height: 0; background: radial-gradient(120% 120% at 50% 0%, #1c2128 0%, #0f1216 100%); }
   #canvas { width: 100%; height: 100%; display: block; }
   #toolbar { position: absolute; top: 10px; left: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+  #toolbar input[type=range] { width: 120px; accent-color: var(--accent); align-self: center; }
   .btn { background: rgba(30,35,42,.85); color: var(--fg); border: 1px solid var(--line);
     border-radius: 6px; padding: 5px 9px; font-size: 12px; cursor: pointer; backdrop-filter: blur(4px); }
   .btn:hover { border-color: var(--accent); }
@@ -62,6 +63,7 @@
     background: rgba(255,107,107,.12); border: 1px solid var(--err); color: #ffd4d4;
     padding: 8px 10px; border-radius: 6px; font-family: var(--mono); font-size: 11px;
     white-space: pre-wrap; max-height: 40%; overflow: auto; display: none; }
+  #banner .hl { background: rgba(255,107,107,.22); color: #fff; }
   #warns { position: absolute; bottom: 132px; right: 10px; max-width: 45%;
     font-family: var(--mono); font-size: 11px; color: var(--warn);
     background: rgba(224,168,74,.10); border: 1px solid var(--warn); border-radius: 6px;
@@ -77,6 +79,9 @@
   .prow input[type=range] { flex: 1; accent-color: var(--accent); }
   .prow input[type=number] { width: 74px; background: var(--bg); color: var(--fg);
     border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; font-family: var(--mono); font-size: 12px; }
+  .prow select, .prow input[type=text] { flex: 1; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; font-family: var(--mono); font-size: 12px; }
+  .prow input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
   .meta-line { padding: 8px 12px; color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--panel2); }
   .meta-line b { color: var(--fg); font-weight: 600; }
   .foot { padding: 8px 12px; color: var(--muted); font-size: 10px; }
@@ -118,6 +123,18 @@
         <button class="btn" id="btnFixedDims">Fixed dims</button>
         <button class="btn" id="btnWire">Wireframe</button>
         <button class="btn" id="btnSpin">Spin</button>
+        <button class="btn" id="btnExport" title="Download the current mesh as .glb">Export GLB</button>
+        <button class="btn" id="btnCopy" title="Copy a render.py command line with your overrides">Copy params</button>
+        <select class="btn" id="segSel" title="Facets per circle (preview smoothness vs speed)">
+          <option value="32">32 facets</option>
+          <option value="48">48 facets</option>
+          <option value="96" selected>96 facets</option>
+          <option value="160">160 facets</option>
+        </select>
+        <button class="btn" id="btnSection" title="Cut the model with a plane">Section</button>
+        <button class="btn" id="btnSecAxis" hidden title="Which Plant axis the cut plane is normal to">Axis Z</button>
+        <input type="range" id="secPos" min="0" max="100" value="50" hidden title="Cut position">
+        <button class="btn" id="btnMeasure" title="Click two points on the model to measure">Measure</button>
       </div>
       <div id="banner"></div>
       <div id="warns"></div>
@@ -149,6 +166,7 @@ const canvas = document.getElementById('canvas');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.autoClear = false;
+renderer.localClippingEnabled = true;
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100000);
 camera.position.set(220, 180, 260);
@@ -156,7 +174,9 @@ const controls = new OrbitControls(camera, canvas);
 controls.enableDamping = true;
 
 scene.add(new THREE.HemisphereLight(0xbfd3ff, 0x28303a, 1.15));
-const key = new THREE.DirectionalLight(0xffffff, 2.0); key.position.set(1, 2, 1.5); scene.add(key);
+// The key light rides with the camera so the side you are looking at is never black.
+const key = new THREE.DirectionalLight(0xffffff, 2.0); key.position.set(1, 2, 1.5);
+camera.add(key); scene.add(camera);
 const fill = new THREE.DirectionalLight(0xffffff, 0.7); fill.position.set(-1.5, -0.5, -1); scene.add(fill);
 
 let grid = new THREE.GridHelper(400, 20, 0x3a4350, 0x252b33);
@@ -172,8 +192,12 @@ addUcsAxis(new THREE.Vector3(1, 0, 0), 0xff5d5d, 'X');
 addUcsAxis(new THREE.Vector3(0, 1, 0), 0x65d982, 'Y');
 addUcsAxis(new THREE.Vector3(0, 0, 1), 0x5da7ff, 'Z');
 
-const modelGroup = new THREE.Group(); scene.add(modelGroup);   // GLB (already Y-up)
-const overlay = new THREE.Group(); scene.add(overlay);          // ports + dims
+// Everything that belongs to the part hangs off `pivot`, so Spin turns the
+// mesh, the ports and the dimension lines as one.
+const pivot = new THREE.Group(); scene.add(pivot);
+const modelGroup = new THREE.Group(); pivot.add(modelGroup);   // GLB (already Y-up)
+const overlay = new THREE.Group(); pivot.add(overlay);          // ports + dims
+const measureGroup = new THREE.Group(); pivot.add(measureGroup);   // measure tool marks
 
 const loader = new GLTFLoader();
 const CREASE_ANGLE = THREE.MathUtils.degToRad(30);
@@ -185,22 +209,33 @@ const P = (p) => new THREE.Vector3(p[0], p[2], -p[1]);
 let spin = false, showPorts = true, showDims = true, showFixedDims = false, wire = false;
 let modelRadius = 100;
 
+let needsDraw = true;      // set by anything that changes what is on screen
+let drawCount = 0, resizeCount = 0;
+function requestDraw() { needsDraw = true; }
+
 function resize() {
   const w = canvas.clientWidth, h = canvas.clientHeight;
-  if (canvas.width !== w || canvas.height !== h) {
+  const cur = renderer.getSize(new THREE.Vector2());   // CSS pixels, unlike canvas.width
+  if (cur.x !== w || cur.y !== h) {
     renderer.setSize(w, h, false);
     camera.aspect = w / h; camera.updateProjectionMatrix();
+    resizeCount++;
+    needsDraw = true;
   }
 }
-function tick() {
-  resize();
-  if (spin) modelGroup.rotation.y += 0.005;
-  controls.update();
+function draw() {
+  drawCount++;
   renderer.setViewport(0, 0, canvas.clientWidth, canvas.clientHeight);
   renderer.setScissorTest(false);
   renderer.clear();
   renderer.render(scene, camera);
   renderUcsInset();
+}
+function tick() {
+  resize();
+  const moved = controls.update();   // true while orbiting or damping
+  if (spin) { pivot.rotation.y += 0.005; needsDraw = true; if (sectionOn) updateSectionPlane(); }
+  if (moved || needsDraw) { needsDraw = false; draw(); }
   requestAnimationFrame(tick);
 }
 tick();
@@ -300,6 +335,7 @@ function drawDimLine(dm, color, labelColor, withPrimitiveName = false) {
   });
   const name = withPrimitiveName && dm.primitive ? `${dm.primitive}.${dm.name}` : dm.name;
   const lbl = makeLabel(`${name}=${len.toFixed(1)}`, labelColor);
+  if (withPrimitiveName) lbl.scale.multiplyScalar(0.75);
   lbl.position.copy(a.clone().add(b).multiplyScalar(0.5));
   overlay.add(lbl);
 }
@@ -325,7 +361,99 @@ function drawOverlays(meta) {
   if (showFixedDims && meta.primitive_dims) {
     meta.primitive_dims.forEach(dm => drawDimLine(dm, 0x65d982, '#a8f0bd', true));
   }
+  requestDraw();
 }
+
+// ---- section cut ------------------------------------------------------------
+// Viewer axes vs Plant axes: viewer X = Plant X, viewer Y = Plant Z, viewer Z = Plant -Y.
+const SECTION_AXES = [{ viewer: 0, label: 'X' }, { viewer: 1, label: 'Z' }, { viewer: 2, label: 'Y' }];
+let sectionOn = false, sectionAxisIdx = 1, sectionFrac = 0.5;
+const sectionPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
+
+function updateSectionPlane() {
+  const axis = SECTION_AXES[sectionAxisIdx].viewer;
+  let lo, hi;
+  if (lastMeta && lastMeta.bounds) {
+    // Model-local bounds in viewer axes, independent of Spin.
+    lo = lastMeta.bounds.min[axis]; hi = lastMeta.bounds.max[axis];
+  } else {
+    pivot.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(modelGroup);
+    if (box.isEmpty()) return;
+    lo = box.min.getComponent(axis); hi = box.max.getComponent(axis);
+  }
+  const n = new THREE.Vector3(); n.setComponent(axis, -1);
+  // Plane in model space: n·p + c = 0. three.js keeps the side where
+  // n·p + c >= 0, i.e. coordinate <= pos. Carried into world space by the
+  // pivot's transform so the cut stays attached to the model while it spins.
+  pivot.updateMatrixWorld(true);
+  sectionPlane.set(n, lo + (hi - lo) * sectionFrac).applyMatrix4(pivot.matrixWorld);
+}
+
+function updateSection() {
+  updateSectionPlane();
+  const planes = sectionOn ? [sectionPlane] : [];
+  modelGroup.traverse(o => {
+    const mats = o.material ? [].concat(o.material) : [];
+    mats.forEach(m => { m.clippingPlanes = planes; m.needsUpdate = true; });
+  });
+  document.getElementById('btnSecAxis').hidden = !sectionOn;
+  document.getElementById('secPos').hidden = !sectionOn;
+  document.getElementById('btnSecAxis').textContent = 'Axis ' + SECTION_AXES[sectionAxisIdx].label;
+  requestDraw();
+}
+
+// ---- measure tool -------------------------------------------------------------
+let measureOn = false, measurePts = [];
+const raycaster = new THREE.Raycaster();
+let pointerDownAt = null;
+
+function measureDistance() {
+  return measurePts.length === 2 ? measurePts[0].distanceTo(measurePts[1]) : 0;
+}
+
+function drawMeasure() {
+  clearGroup(measureGroup);
+  const color = 0xff7ad9;
+  measurePts.forEach(p => {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(modelRadius * 0.015, 12, 12),
+      new THREE.MeshBasicMaterial({ color, depthTest: false }));
+    m.position.copy(p); m.renderOrder = 998; measureGroup.add(m);
+  });
+  if (measurePts.length === 2) {
+    const g = new THREE.BufferGeometry().setFromPoints(measurePts);
+    const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.95 }));
+    line.renderOrder = 998; measureGroup.add(line);
+    const unit = (lastMeta && lastMeta.activate && lastMeta.activate.LengthUnit) || 'mm';
+    const lbl = makeLabel(`Δ=${measureDistance().toFixed(1)} ${unit}`, '#ffb3ec');
+    lbl.position.copy(measurePts[0].clone().add(measurePts[1]).multiplyScalar(0.5));
+    measureGroup.add(lbl);
+    if (lastMeta) showMeta(lastMeta);
+  }
+  requestDraw();
+}
+
+function pickOnModel(clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const meshes = []; modelGroup.traverse(o => { if (o.isMesh) meshes.push(o); });
+  const hit = raycaster.intersectObjects(meshes, false)[0];
+  return hit ? pivot.worldToLocal(hit.point.clone()) : null;   // store in pivot space so Spin carries it
+}
+
+canvas.addEventListener('pointerdown', (e) => { pointerDownAt = [e.clientX, e.clientY]; });
+canvas.addEventListener('pointerup', (e) => {
+  if (!measureOn || !pointerDownAt) return;
+  const moved = Math.hypot(e.clientX - pointerDownAt[0], e.clientY - pointerDownAt[1]);
+  pointerDownAt = null;
+  if (moved > 4) return;             // that was an orbit drag, not a click
+  const p = pickOnModel(e.clientX, e.clientY);
+  if (!p) return;
+  if (measurePts.length >= 2) measurePts = [];
+  measurePts.push(p);
+  drawMeasure();
+});
 
 function frameModel(bounds) {
   const box = new THREE.Box3();
@@ -345,6 +473,7 @@ function frameModel(bounds) {
   grid = new THREE.GridHelper(gs * 2, 20, 0x3a4350, 0x252b33); grid.visible = document.getElementById('btnGrid').classList.contains('on');
   scene.add(grid);
   axes.scale.setScalar(modelRadius / 60);
+  requestDraw();
 }
 
 // ---- data flow ------------------------------------------------------------
@@ -354,6 +483,41 @@ let browsePath = '';
 let currentValues = {};   // effective values reported by the last render (display)
 let userValues = {};      // ONLY params the user explicitly overrode (sent to server)
 let debounceTimer = null;
+let lastMeta = null;       // meta of the last successful render (for overlay redraws and tests)
+let renderCount = 0;       // number of /api/render requests issued
+
+// Test hook: read-only access for the Playwright suite. Not used by the UI.
+window.__p3d = {
+  lastMeta: () => lastMeta,
+  userValues: () => userValues,
+  renderCount: () => renderCount,
+  overlayCount: () => overlay.children.length,
+  cameraPosition: () => camera.position.toArray().map(v => Math.round(v * 1000) / 1000),
+  drawCount: () => drawCount,
+  resizeCount: () => resizeCount,
+  pivotRotationY: () => pivot.rotation.y,
+  overlayShareSpinPivot: () => pivot.children.includes(modelGroup) && pivot.children.includes(overlay),
+  paramString, exportName,
+  clipPlaneCount: () => { let n = 0; modelGroup.traverse(o => { if (o.isMesh) n += (o.material.clippingPlanes || []).length; }); return n; },
+  measureCount: () => measurePts.length, measureDistance,
+};
+
+// ---- URL hash state: #script=REL&p={"D":300} ---------------------------------
+function readHash() {
+  try {
+    const h = new URLSearchParams(location.hash.slice(1));
+    const values = h.get('p') ? JSON.parse(h.get('p')) : {};
+    const isObj = values && typeof values === 'object' && !Array.isArray(values);
+    return { script: h.get('script') || null, values: isObj ? values : {} };
+  } catch (_) { return { script: null, values: {} }; }
+}
+function writeHash() {
+  const h = new URLSearchParams();
+  if (currentScript) h.set('script', currentScript);
+  if (Object.keys(userValues).length) h.set('p', JSON.stringify(userValues));
+  history.replaceState(null, '', h.toString() ? '#' + h.toString() : location.pathname);
+}
+let startupHash = readHash();   // consumed by the first list load only
 
 async function api(path, options) {
   const r = await fetch(path, options);
@@ -409,140 +573,273 @@ function applyMaterials() {
       o.userData.edgeLines.visible = !wire;
     }
   });
+  updateSection();
+  requestDraw();
 }
 
-async function render({ rebuildPanel = false, frame = false } = {}) {
-  if (!currentScript) return;
-  // Always send only explicit overrides so untouched params follow the file's
-  // current defaults (important for live-reload after editing a default).
-  const url = `/api/render?script=${encodeURIComponent(currentScript)}&params=${encodeURIComponent(JSON.stringify(userValues))}`;
-  let data;
-  try {
-    data = await api(url);
-  } catch (err) {
-    const banner = document.getElementById('banner');
-    banner.style.display = 'block';
-    banner.textContent = String(err.message || err);
-    return;
-  }
+let renderSeq = 0;         // increments per request; responses older than the latest are dropped
+let pendingRebuild = false, pendingFrame = false;   // see render()
+let segments = 96;
+
+function showBanner(text) {
   const banner = document.getElementById('banner');
-  if (data.error) {
-    banner.style.display = 'block';
-    banner.textContent = `⚠ ${currentScript}\n${data.error}`;
-    return;
-  }
-  banner.style.display = 'none';
-  const meta = data.meta;
+  banner.style.display = 'block';
+  banner.textContent = '';
+  // Highlight traceback lines that point into the current script so the
+  // offending line stands out from the shim frames.
+  const stem = currentScript ? currentScript.slice(currentScript.lastIndexOf('/') + 1) : null;
+  String(text).split('\n').forEach((line, i) => {
+    const span = document.createElement('span');
+    span.textContent = (i ? '\n' : '') + line;
+    if (stem && line.includes('File "') && line.includes(stem)) span.className = 'hl';
+    banner.appendChild(span);
+  });
+}
+function hideBanner() { document.getElementById('banner').style.display = 'none'; }
 
-  // geometry
-  clearGroup(modelGroup); modelGroup.rotation.y = 0;
-  if (data.glb_b64) {
-    loader.parse(b64ToBuf(data.glb_b64), '', (gltf) => {
-      modelGroup.add(gltf.scene);
-      applyMaterials();
-      if (frame) frameModel(meta.bounds);
-      drawOverlays(meta);
-    }, (err) => {
-      document.getElementById('banner').style.display = 'block';
-      document.getElementById('banner').textContent = 'GLB load error: ' + err;
-    });
-  } else {
-    drawOverlays(meta);
-  }
+function parseGlb(b64) {
+  return new Promise((resolve, reject) => loader.parse(b64ToBuf(b64), '', resolve, reject));
+}
 
-  // hud
+function showMeta(meta) {
   const unit = (meta.activate && meta.activate.LengthUnit) || 'mm';
+  const ms = typeof meta.elapsed_ms === 'number' ? `  ·  ${meta.elapsed_ms} ms` : '';
+  const meas = measurePts.length === 2 ? `  ·  Δ=${measureDistance().toFixed(1)} ${unit}` : '';
   document.getElementById('hud').textContent =
-    `${meta.entry}()  ·  ${meta.solid_count} solid(s)  ·  ${meta.ports.length} port(s)  ·  ${unit}`;
-
-  // warnings
+    `${meta.entry}()  ·  ${meta.solid_count} solid(s)  ·  ${meta.ports.length} port(s)  ·  ${unit}${ms}${meas}`;
   const warns = document.getElementById('warns');
   if (meta.warnings && meta.warnings.length) {
     warns.style.display = 'block';
     warns.textContent = '⚠ ' + meta.warnings.join('\n⚠ ');
   } else warns.style.display = 'none';
+}
 
-  if (rebuildPanel) buildPanel(meta);
+// Called when a script fails to render: nothing on screen may describe the
+// previous script any more, or its sliders would send overrides to this one.
+function clearModelUi() {
+  clearGroup(modelGroup); clearGroup(overlay);
+  lastMeta = null;
+  document.getElementById('hud').textContent = '—';
+  document.getElementById('warns').style.display = 'none';
+  document.getElementById('params').innerHTML = '<div class="empty">no render</div>';
+  lastGlbB64 = null; document.getElementById('btnExport').disabled = true;
+  measurePts = []; clearGroup(measureGroup);
+  requestDraw();
+}
+
+let lastGlbB64 = null;    // kept for Export GLB
+
+function exportName() {
+  if (!currentScript) return 'model.glb';
+  const stem = currentScript.slice(currentScript.lastIndexOf('/') + 1).replace(/\.py$/, '');
+  return stem + '.glb';
+}
+function paramString() {
+  if (!currentScript) return '';
+  const parts = Object.entries(userValues).map(([k, v]) => `${k}=${typeof v === 'string' ? JSON.stringify(v) : v}`);
+  return `render.py ${currentScript}` + (parts.length ? ' -p ' + parts.join(' ') : '');
+}
+function downloadGlb() {
+  if (!lastGlbB64) return;
+  const blob = new Blob([b64ToBuf(lastGlbB64)], { type: 'model/gltf-binary' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = exportName();
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+async function copyParams() {
+  const s = paramString();
+  try { await navigator.clipboard.writeText(s); }
+  catch (_) { window.prompt('Copy this command line:', s); }
+}
+
+async function render({ rebuildPanel = false, frame = false } = {}) {
+  if (!currentScript) return;
+  const script = currentScript;
+  const seq = ++renderSeq;
+  renderCount++;
+  // Flags accumulate across superseded requests: if a "load script" render
+  // (frame + rebuild) is overtaken by a slider render, the winner still frames
+  // and rebuilds. Consumed by whichever response lands with seq === renderSeq.
+  pendingRebuild = pendingRebuild || rebuildPanel;
+  pendingFrame = pendingFrame || frame;
+  // Always send only explicit overrides so untouched params follow the file's
+  // current defaults (important for live-reload after editing a default).
+  const url = `/api/render?script=${encodeURIComponent(script)}&params=${encodeURIComponent(JSON.stringify(userValues))}&segments=${segments}`;
+  let data;
+  try {
+    data = await api(url);
+  } catch (err) {
+    if (seq !== renderSeq) return;
+    showBanner(String(err.message || err));
+    return;
+  }
+  if (seq !== renderSeq) return;   // a newer request superseded this one; drop the stale response
+  if (data.error) {
+    showBanner(`⚠ ${script}\n${data.error}`);
+    if (pendingRebuild) clearModelUi();
+    pendingRebuild = false; pendingFrame = false;
+    return;
+  }
+  const meta = data.meta;
+  let gltf = null;
+  if (data.glb_b64) {
+    try {
+      gltf = await parseGlb(data.glb_b64);
+    } catch (err) {
+      showBanner('GLB load error: ' + err);
+      return;
+    }
+    if (seq !== renderSeq) return;
+  }
+  hideBanner();
+  const doFrame = pendingFrame, doRebuild = pendingRebuild;
+  pendingRebuild = false; pendingFrame = false;
+  // Swap only now, so the previous model stays on screen until the new one is ready.
+  clearGroup(modelGroup); pivot.rotation.y = 0;
+  measurePts = []; clearGroup(measureGroup);
+  lastMeta = meta;   // before applyMaterials: the section plane reads meta.bounds
+  if (gltf) { modelGroup.add(gltf.scene); applyMaterials(); }
+  lastGlbB64 = data.glb_b64 || null; document.getElementById('btnExport').disabled = !lastGlbB64;
+  if (doFrame) frameModel(meta.bounds);
+  drawOverlays(meta);
+  showMeta(meta);
+  if (doRebuild) buildPanel(meta);
   return meta;
 }
 
 function scheduleRender() {
+  writeHash();
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => render(), 120);
 }
 
+function el(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
+
 function buildPanel(meta) {
   const panel = document.getElementById('params');
   panel.innerHTML = '';
-  const grp = (meta.activate && meta.activate.Group) || '—';
-  const tip = (meta.activate && meta.activate.TooltipLong) || '';
-  const info = document.createElement('div'); info.className = 'meta-line';
-  info.innerHTML = `<b>${meta.activate.TooltipShort || meta.entry}</b> · group “${grp}”` + (tip ? `<br><span style="color:var(--muted)">${tip}</span>` : '');
+  const act = meta.activate || {};
+  const info = el('div', 'meta-line');
+  const b = el('b'); b.textContent = act.TooltipShort || meta.entry;
+  info.append(b, ` · group “${act.Group || '—'}”`);
+  if (act.TooltipLong) {
+    info.appendChild(el('br'));
+    const t = el('span'); t.style.color = 'var(--muted)'; t.textContent = act.TooltipLong;
+    info.appendChild(t);
+  }
   panel.appendChild(info);
-
   currentValues = Object.assign({}, meta.values);
+  meta.params.forEach(p => panel.appendChild(buildParamRow(p)));
+}
 
-  meta.params.forEach(p => {
-    // effective value: user override if present, otherwise the file's default
-    const v = (p.name in userValues) ? userValues[p.name] : p.default;
-    currentValues[p.name] = v;
-    const row = document.createElement('div'); row.className = 'prow';
+function buildParamRow(p) {
+  // effective value: user override if present, otherwise the file's default
+  const v = (p.name in userValues) ? userValues[p.name] : p.default;
+  currentValues[p.name] = v;
+  const row = el('div', 'prow');
+  const lbl = el('div', 'lbl');
+  const name = el('span', 'name');
+  const code = el('span', 'code'); code.textContent = p.name; name.appendChild(code);
+  if (p.short && p.short !== p.name) name.append(' · ' + p.short);
+  const tt = el('span', 'tt'); tt.textContent = p.type;
+  lbl.append(name, tt); row.appendChild(lbl);
+  const controls = el('div', 'controls'); row.appendChild(controls);
+  const commit = (val) => { currentValues[p.name] = val; userValues[p.name] = val; scheduleRender(); };
+
+  const isBool = p.type === 'BOOL' || p.type === 'BOOLEAN' || p.type === 'b' || typeof v === 'boolean';
+  const isText = p.type === 'STRING' || (typeof v === 'string' && isNaN(parseFloat(v)));
+  if (p.enum && p.enum.length) {
+    const sel = el('select');
+    p.enum.forEach(o => {
+      const opt = el('option'); opt.value = o; opt.textContent = o;
+      if (String(o) === String(v)) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    // Send a number when the option is numeric and the default was numeric; else a string.
+    sel.addEventListener('change', () => {
+      const s = sel.value;
+      commit(typeof p.default === 'number' && s.trim() !== '' && !isNaN(+s) ? +s : s);
+    });
+    controls.appendChild(sel);
+  } else if (isBool) {
+    const cb = el('input'); cb.type = 'checkbox'; cb.checked = !!v && v !== '0';
+    cb.addEventListener('change', () => commit(cb.checked));
+    controls.appendChild(cb);
+  } else if (isText) {
+    const txt = el('input'); txt.type = 'text'; txt.value = v;
+    txt.addEventListener('input', () => commit(txt.value));
+    controls.appendChild(txt);
+  } else {
     const isInt = p.type === 'INT' || p.type === 'INTEGER';
-    const step = isInt ? 1 : 'any';
-    const sliderMax = Math.max(Math.abs(v) * 3, Math.abs(v) + 50, 10);
-    const sliderMin = p.allow_negative ? -sliderMax : 0;
-    row.innerHTML = `
-      <div class="lbl">
-        <span class="name"><span class="code">${p.name}</span> ${p.short && p.short !== p.name ? '· ' + p.short : ''}</span>
-        <span class="tt">${p.type}</span>
-      </div>
-      <div class="controls">
-        <input type="range" min="${sliderMin}" max="${sliderMax}" step="${isInt ? 1 : sliderMax / 200}" value="${v}">
-        <input type="number" step="${step}" value="${v}">
-      </div>
-      ${p.long ? `<div class="tt" style="margin-top:4px">${p.long}</div>` : ''}`;
-    const [range, num] = row.querySelectorAll('input');
+    const num = parseFloat(v) || 0;
+    const sliderMax = Math.max(Math.abs(num) * 3, Math.abs(num) + 50, 10);
+    const fineStep = isInt ? 1 : sliderMax / 200;
+    // LENGTH (allow_zero false) must not be able to hit 0: that yields empty geometry.
+    const sliderMin = p.allow_negative ? -sliderMax : (p.allow_zero ? 0 : fineStep);
+    const range = el('input'); range.type = 'range';
+    range.min = sliderMin; range.max = sliderMax; range.step = fineStep; range.value = num;
+    const nbox = el('input'); nbox.type = 'number'; nbox.step = isInt ? 1 : 'any'; nbox.value = num;
+    controls.append(range, nbox);
     const set = (val, from) => {
       let f = parseFloat(val); if (isNaN(f)) return;
       if (isInt) f = Math.round(f);
-      currentValues[p.name] = f;
-      userValues[p.name] = f;
       if (from !== 'range') { if (f > +range.max) range.max = f; if (f < +range.min) range.min = f; range.value = f; }
-      if (from !== 'num') num.value = f;
-      scheduleRender();
+      if (from !== 'num') nbox.value = f;
+      commit(f);
     };
     range.addEventListener('input', () => set(range.value, 'range'));
-    num.addEventListener('input', () => set(num.value, 'num'));
-    panel.appendChild(row);
-  });
+    nbox.addEventListener('input', () => set(nbox.value, 'num'));
+  }
+  if (p.long) { const l = el('div', 'tt'); l.style.marginTop = '4px'; l.textContent = p.long; row.appendChild(l); }
+  return row;
 }
 
-async function loadScript(rel) {
+const dirOf = (p) => p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
+
+function markSelected(rel) {
+  document.querySelectorAll('.item').forEach(el => el.classList.toggle('sel', el.dataset.path === rel));
+}
+
+async function loadScript(rel, initialValues = {}) {
   currentScript = rel;
   currentValues = {};
-  userValues = {};   // fresh script: start from its own defaults
-  document.querySelectorAll('.item').forEach(el => el.classList.toggle('sel', el.dataset.path === rel));
+  userValues = Object.assign({}, initialValues);   // fresh script: start from its own defaults
+  markSelected(rel);
+  writeHash();
   await render({ rebuildPanel: true, frame: true });
 }
 
-async function loadList({ preferCurrent = false } = {}) {
+let listPromise = null, listPromiseKey = null;
+function loadList(opts = {}) {
+  // Coalesce identical overlapping calls (page open + first SSE message).
+  // Queue differing ones: a root switch must run its full load after any
+  // preferCurrent refresh the __root__ event has already started.
+  const key = JSON.stringify(opts);
+  if (listPromise && listPromiseKey === key) return listPromise;
+  const run = () => _loadList(opts);
+  const p = listPromise ? listPromise.then(run, run) : run();
+  listPromise = p; listPromiseKey = key;
+  const done = () => { if (listPromise === p) { listPromise = null; listPromiseKey = null; } };
+  p.then(done, done);
+  return p;
+}
+
+async function _loadList({ preferCurrent = false } = {}) {
   const { root, scripts } = await api('/api/scripts');
   currentRoot = root || '';
   document.getElementById('rootpath').textContent = currentRoot || '—';
   const list = document.getElementById('scriptlist'); list.innerHTML = '';
   if (!scripts.length) {
     currentScript = null;
-    clearGroup(modelGroup); clearGroup(overlay);
-    document.getElementById('params').innerHTML = '<div class="empty">no scripts found</div>';
-    document.getElementById('hud').textContent = '—';
+    clearModelUi();
     list.innerHTML = '<div class="empty">no scripts found</div>';
     return;
   }
   const byDir = {};
   scripts.forEach(s => {
-    const i = s.lastIndexOf('/');
-    const d = i === -1 ? '' : s.slice(0, i);
-    const f = i === -1 ? s : s.slice(i + 1);
+    const d = dirOf(s);
+    const f = d ? s.slice(d.length + 1) : s;
     (byDir[d] = byDir[d] || []).push({ f, path: s });
   });
   Object.keys(byDir).sort().forEach(d => {
@@ -552,10 +849,21 @@ async function loadList({ preferCurrent = false } = {}) {
       el.onclick = () => loadScript(path); list.appendChild(el);
     });
   });
-  const next = preferCurrent && scripts.includes(currentScript) ? currentScript : scripts[0];
-  if (next) loadScript(next);
+  if (preferCurrent && currentScript && scripts.includes(currentScript)) {
+    markSelected(currentScript);   // list rebuilt; keep the model, overrides and camera as they are
+    return;
+  }
+  const wanted = startupHash.script && scripts.includes(startupHash.script) ? startupHash.script : scripts[0];
+  const initial = startupHash.values;
+  startupHash = { script: null, values: {} };
+  await loadScript(wanted, initial);
 }
-loadList();
+loadList().catch(err => {
+  document.getElementById('scriptlist').innerHTML = '';
+  const msg = document.createElement('div'); msg.className = 'empty';
+  msg.textContent = 'cannot reach the preview server: ' + (err.message || err);
+  document.getElementById('scriptlist').appendChild(msg);
+});
 
 function renderBrowser(data) {
   browsePath = data.path;
@@ -639,22 +947,28 @@ async function useBrowseFolder() {
 
 // ---- live reload via SSE --------------------------------------------------
 const dot = document.getElementById('livedot');
+let sseWasOpen = false;
 function connectSSE() {
   const es = new EventSource('/api/events');
-  es.onopen = () => dot.classList.add('live');
+  es.onopen = () => {
+    dot.classList.add('live');
+    if (sseWasOpen) {
+      // Reconnected after the server went away: anything may have changed meanwhile.
+      loadList({ preferCurrent: true }).then(() => render({ rebuildPanel: true }));
+    }
+    sseWasOpen = true;
+  };
   es.onerror = () => { dot.classList.remove('live'); };
   es.onmessage = (e) => {
-    try {
-      const d = JSON.parse(e.data);
-      if (d.changed === '__root__' || d.changed === '__scripts__') {
-        loadList({ preferCurrent: true });
-      } else if (d.changed && d.changed === currentScript) {
-        // re-render keeping the user's explicit overrides; untouched params
-        // follow the file's (possibly edited) defaults. Rebuild the panel in
-        // case the parameter set changed. Camera is left as-is.
-        render({ rebuildPanel: true });
-      }
-    } catch (_) {}
+    let d;
+    try { d = JSON.parse(e.data); } catch (_) { return; }
+    if (!d.changed) return;
+    if (d.changed === '__root__' || d.changed === '__scripts__') { loadList({ preferCurrent: true }); return; }
+    // Any .py in the current script's folder changed (the script itself or a
+    // helper it imports): re-render keeping the user's explicit overrides.
+    // Untouched params follow the file's (possibly edited) defaults. Rebuild
+    // the panel in case the parameter set changed. Camera is left as-is.
+    if (currentScript && dirOf(d.changed) === dirOf(currentScript)) render({ rebuildPanel: true });
   };
 }
 connectSSE();
@@ -667,12 +981,23 @@ tb('btnCloseBrowser', () => { stopBrowseRefresh(); document.getElementById('fold
 tb('btnUp', (e) => { if (e.target.dataset.path) browseFolder(e.target.dataset.path); });
 tb('btnUseFolder', () => useBrowseFolder());
 tb('btnFrame', () => frameModel(null));
-tb('btnReset', () => { userValues = {}; render({ rebuildPanel: true, frame: true }); });
-tb('btnGrid', (e) => { grid.visible = toggle(e.target); });
-tb('btnPorts', (e) => { showPorts = toggle(e.target); render(); });
-tb('btnDims', (e) => { showDims = toggle(e.target); render(); });
-tb('btnFixedDims', (e) => { showFixedDims = toggle(e.target); render(); });
+tb('btnReset', () => { userValues = {}; writeHash(); render({ rebuildPanel: true, frame: true }); });
+tb('btnGrid', (e) => { grid.visible = toggle(e.target); requestDraw(); });
+tb('btnPorts', (e) => { showPorts = toggle(e.target); if (lastMeta) drawOverlays(lastMeta); });
+tb('btnDims', (e) => { showDims = toggle(e.target); if (lastMeta) drawOverlays(lastMeta); });
+tb('btnFixedDims', (e) => { showFixedDims = toggle(e.target); if (lastMeta) drawOverlays(lastMeta); });
 tb('btnWire', (e) => { wire = toggle(e.target); applyMaterials(); });
 tb('btnSpin', (e) => { spin = toggle(e.target); });
+tb('btnExport', () => downloadGlb());
+tb('btnCopy', () => copyParams());
+document.getElementById('segSel').addEventListener('change', (e) => { segments = +e.target.value; render(); });
+tb('btnSection', (e) => { sectionOn = toggle(e.target); updateSection(); });
+tb('btnSecAxis', () => { sectionAxisIdx = (sectionAxisIdx + 1) % SECTION_AXES.length; updateSection(); });
+document.getElementById('secPos').addEventListener('input', (e) => { sectionFrac = e.target.value / 100; updateSection(); });
+tb('btnMeasure', (e) => {
+  measureOn = toggle(e.target); measurePts = []; drawMeasure();
+  if (lastMeta) showMeta(lastMeta);   // drop the Δ= readout from the HUD
+  canvas.style.cursor = measureOn ? 'crosshair' : '';
+});
 addEventListener('resize', resize);
 </script>

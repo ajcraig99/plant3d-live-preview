@@ -36,10 +36,24 @@ from manifold3d import Manifold, CrossSection
 # Facet count for round primitives. Higher = smoother preview but slower
 # booleans. This is a preview, so favour looks; override via P3D_SEGMENTS env.
 import os
+import math
 SEGMENTS = int(os.environ.get("P3D_SEGMENTS", "96"))
 
 # Tiny overlap used to avoid coplanar faces on through-cuts (cosmetic only).
 _EPS = 1e-4
+
+
+def _rot(p, axis, deg):
+    """Rotate point p about world axis (0=X, 1=Y, 2=Z) by `deg` degrees,
+    right-handed, matching Manifold.rotate."""
+    a = math.radians(deg)
+    c, sn = math.cos(a), math.sin(a)
+    x, y, z = p
+    if axis == 0:
+        return (x, y * c - z * sn, y * sn + z * c)
+    if axis == 1:
+        return (x * c + z * sn, y, -x * sn + z * c)
+    return (x * c - y * sn, x * sn + y * c, z)
 
 
 class Scene:
@@ -47,7 +61,8 @@ class Scene:
     the script's entry function. Owns every solid created during a run and
     collects the ports / dimensions the script declares."""
 
-    def __init__(self):
+    def __init__(self, segments=None):
+        self.segments = int(segments) if segments else SEGMENTS
         self.solids = []        # every Solid ever created, in creation order
         self.points = []        # {'pos':(x,y,z), 'dir':(dx,dy,dz), 'extra':(...)}
         self.dims = []          # {'name':str, 'a':(x,y,z), 'b':(x,y,z)}
@@ -61,6 +76,14 @@ class Scene:
         return [
             s for s in self.solids
             if not s.erased and not s.consumed and not s.m.is_empty()
+        ]
+
+    def primitive_dims(self):
+        """Defining lengths of every live primitive, in world coordinates,
+        as [{'primitive','name','a','b'}]. Feeds the viewer's Fixed dims."""
+        return [
+            {"primitive": s.primitive, "name": d["name"], "a": d["a"], "b": d["b"]}
+            for s in self.live_solids() for d in s.dims
         ]
 
     # -- ports & dimensions --------------------------------------------------
@@ -93,38 +116,53 @@ class Scene:
 class Solid:
     """Wraps a manifold3d.Manifold and exposes the Plant 3D transform / boolean
     method surface. Transforms and booleans mutate in place and return self so
-    they can be chained, exactly like the Plant API."""
+    they can be chained, exactly like the Plant API.
 
-    __slots__ = ("scene", "m", "erased", "consumed")
+    `dims` holds the primitive's defining lengths as world-space segments and
+    is kept in step with every transform, so the viewer can label them."""
 
-    def __init__(self, scene, manifold):
+    __slots__ = ("scene", "m", "erased", "consumed", "primitive", "dims")
+
+    def __init__(self, scene, manifold, primitive="SOLID", dims=None):
         self.scene = scene
         self.m = manifold
         self.erased = False
         self.consumed = False
+        self.primitive = primitive
+        self.dims = list(dims or [])
         scene._register(self)
+
+    def _map_dims(self, f):
+        self.dims = [{"name": d["name"], "a": f(d["a"]), "b": f(d["b"])} for d in self.dims]
 
     # -- transforms (mutate in place, chainable) -----------------------------
     def translate(self, v):
-        self.m = self.m.translate((float(v[0]), float(v[1]), float(v[2])))
+        t = (float(v[0]), float(v[1]), float(v[2]))
+        self.m = self.m.translate(t)
+        self._map_dims(lambda p: (p[0] + t[0], p[1] + t[1], p[2] + t[2]))
         return self
 
     def rotateX(self, deg):
         self.m = self.m.rotate((float(deg), 0.0, 0.0))
+        self._map_dims(lambda p: _rot(p, 0, float(deg)))
         return self
 
     def rotateY(self, deg):
         self.m = self.m.rotate((0.0, float(deg), 0.0))
+        self._map_dims(lambda p: _rot(p, 1, float(deg)))
         return self
 
     def rotateZ(self, deg):
         self.m = self.m.rotate((0.0, 0.0, float(deg)))
+        self._map_dims(lambda p: _rot(p, 2, float(deg)))
         return self
 
     def scale(self, v):
         if isinstance(v, (int, float)):
             v = (v, v, v)
-        self.m = self.m.scale((float(v[0]), float(v[1]), float(v[2])))
+        sx, sy, sz = float(v[0]), float(v[1]), float(v[2])
+        self.m = self.m.scale((sx, sy, sz))
+        self._map_dims(lambda p: (p[0] * sx, p[1] * sy, p[2] * sz))
         return self
 
     # -- booleans (caller keeps the result; see fidelity policy above) --------
@@ -164,55 +202,93 @@ class Solid:
 # Primitive constructors. Each takes the scene `s` first and returns a Solid.
 # ---------------------------------------------------------------------------
 
+def _seg(name, a, b):
+    return {"name": name, "a": tuple(float(x) for x in a), "b": tuple(float(x) for x in b)}
+
+
+def _finish(s, name, manifold, args, dims=()):
+    """Wrap `manifold` in a Solid and warn if it came out empty, which is what
+    happens for zero or negative sizes. A silently missing part is confusing
+    in a preview, so say so."""
+    solid = Solid(s, manifold, primitive=name, dims=dims)
+    if manifold.is_empty():
+        desc = ", ".join("%s=%s" % (k, v) for k, v in args.items())
+        s.warnings.append(
+            "%s(%s) produced no geometry (check for zero or negative sizes)" % (name, desc))
+    return solid
+
+
 def BOX(s, L=1.0, W=1.0, H=1.0, **kw):
-    return Solid(s, Manifold.cube([float(H), float(L), float(W)], True))
+    L, W, H = float(L), float(W), float(H)
+    c = (-H / 2.0, -L / 2.0, -W / 2.0)          # min corner; H->X, L->Y, W->Z
+    dims = [
+        _seg("H", c, (c[0] + H, c[1], c[2])),
+        _seg("L", c, (c[0], c[1] + L, c[2])),
+        _seg("W", c, (c[0], c[1], c[2] + W)),
+    ]
+    return _finish(s, "BOX", Manifold.cube([H, L, W], True), {"L": L, "W": W, "H": H}, dims)
 
 
 def CYLINDER(s, R=None, H=1.0, O=0.0, R1=None, R2=None, **kw):
     H = float(H)
+    dims = [_seg("H", (0, 0, 0), (0, 0, H))]
     # Elliptical / tapered form CYLINDER(R1=, R2=, H=, O=) -> treat as cone-ish.
     if R is None and R1 is not None:
         low = float(R1)
         high = float(R2) if R2 is not None else float(R1)
-        outer = Manifold.cylinder(H, low, high, SEGMENTS, False)
+        outer = Manifold.cylinder(H, low, high, s.segments, False)
+        dims.append(_seg("R1", (0, 0, 0), (low, 0, 0)))
+        dims.append(_seg("R2", (0, 0, H), (high, 0, H)))
     else:
         r = float(R if R is not None else (R1 if R1 is not None else 1.0))
-        outer = Manifold.cylinder(H, r, r, SEGMENTS, False)
-    solid = Solid(s, outer)
+        outer = Manifold.cylinder(H, r, r, s.segments, False)
+        dims.append(_seg("R", (0, 0, 0), (r, 0, 0)))
     O = float(O or 0.0)
     if O > 0.0:
-        bore = Manifold.cylinder(H + 2 * _EPS, O, O, SEGMENTS, False).translate((0, 0, -_EPS))
-        solid.m = solid.m - bore
-    return solid
+        bore = Manifold.cylinder(H + 2 * _EPS, O, O, s.segments, False).translate((0, 0, -_EPS))
+        outer = outer - bore
+        dims.append(_seg("O", (0, 0, H), (O, 0, H)))
+    return _finish(s, "CYLINDER", outer, {"R": R, "H": H, "O": O, "R1": R1, "R2": R2}, dims)
 
 
 def CONE(s, R1=1.0, R2=0.0, H=1.0, E=0.0, **kw):
     # E (eccentricity) is 0.0 everywhere in the repo; concentric cone.
-    return Solid(s, Manifold.cylinder(float(H), float(R1), float(R2), SEGMENTS, False))
+    R1, R2, H = float(R1), float(R2), float(H)
+    dims = [_seg("H", (0, 0, 0), (0, 0, H)), _seg("R1", (0, 0, 0), (R1, 0, 0))]
+    if R2 > 0.0:
+        dims.append(_seg("R2", (0, 0, H), (R2, 0, H)))
+    return _finish(s, "CONE", Manifold.cylinder(H, R1, R2, s.segments, False),
+                   {"R1": R1, "R2": R2, "H": H}, dims)
 
 
 def TORUS(s, R1=1.0, R2=0.5, **kw):
     # Ring radius R1, tube radius R2. Revolve a circle; manifold's revolve puts
     # the resulting axis on Z, matching Plant's TORUS (ring in XY plane).
-    circle = CrossSection.circle(float(R2), SEGMENTS).translate((float(R1), 0.0))
-    return Solid(s, Manifold.revolve(circle, SEGMENTS, 360.0))
+    R1, R2 = float(R1), float(R2)
+    circle = CrossSection.circle(R2, s.segments).translate((R1, 0.0))
+    dims = [_seg("R1", (0, 0, 0), (R1, 0, 0)), _seg("R2", (R1, 0, 0), (R1 + R2, 0, 0))]
+    return _finish(s, "TORUS", Manifold.revolve(circle, s.segments, 360.0), {"R1": R1, "R2": R2}, dims)
 
 
 def SPHERE(s, R=1.0, **kw):
-    return Solid(s, Manifold.sphere(float(R), SEGMENTS))
+    R = float(R)
+    return _finish(s, "SPHERE", Manifold.sphere(R, s.segments), {"R": R},
+                   [_seg("R", (0, 0, 0), (R, 0, 0))])
 
 
 def HALFSPHERE(s, R=1.0, **kw):
-    sph = Manifold.sphere(float(R), SEGMENTS)
+    R = float(R)
+    sph = Manifold.sphere(R, s.segments)
     # keep the +Z half
-    box = Manifold.cube([4 * float(R), 4 * float(R), 4 * float(R)], True).translate((0, 0, 2 * float(R)))
-    return Solid(s, sph ^ box)
+    box = Manifold.cube([4 * R, 4 * R, 4 * R], True).translate((0, 0, 2 * R))
+    return _finish(s, "HALFSPHERE", sph ^ box, {"R": R}, [_seg("R", (0, 0, 0), (0, 0, R))])
 
 
 def ELLIPSOIDHEAD(s, R=1.0, H=None, **kw):
     # Approximate a 2:1 ellipsoidal head as a squashed half-sphere.
     r = float(R)
     h = float(H) if H is not None else r / 2.0
-    sph = Manifold.sphere(r, SEGMENTS)
+    sph = Manifold.sphere(r, s.segments)
     box = Manifold.cube([4 * r, 4 * r, 4 * r], True).translate((0, 0, 2 * r))
-    return Solid(s, (sph ^ box).scale((1.0, 1.0, h / r)))
+    dims = [_seg("R", (0, 0, 0), (r, 0, 0)), _seg("H", (0, 0, 0), (0, 0, h))]
+    return _finish(s, "ELLIPSOIDHEAD", (sph ^ box).scale((1.0, 1.0, h / r)), {"R": R, "H": h}, dims)

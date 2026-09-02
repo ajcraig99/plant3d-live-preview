@@ -38,6 +38,12 @@ b = ParamType("b")                           # boolean
 # signed offset "d-" isn't a valid identifier; expose as DMINUS if ever needed.
 DMINUS = ParamType("d-", allow_negative=True)
 
+__all__ = [
+    "ParamType", "LENGTH", "LENGTH0", "ANGLE", "ENUM", "INT", "INTEGER", "BOOL",
+    "BOOLEAN", "STRING", "d", "d0", "a", "r", "b", "DMINUS",
+    "activate", "group", "param", "enum",
+]
+
 
 def __getattr__(name):
     # Any unknown ALL-CAPS identifier used as a parameter-type constant

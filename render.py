@@ -5,7 +5,7 @@ ports and dimensions.
 
 Usable as a library (see render_script) or a CLI:
 
-    python render.py path/to/script.py                       # -> script.glb + script.json
+    python render.py path/to/script.py                       # -> script.glb + script.meta.json
     python render.py path/to/script.py -o out.glb
     python render.py path/to/script.py -p D=80 L=150
 """
@@ -13,7 +13,10 @@ Usable as a library (see render_script) or a CLI:
 import os
 import sys
 import json
+import time
 import inspect
+import tempfile
+import threading
 import importlib.util
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +28,27 @@ import numpy as np                      # noqa: E402
 import trimesh                          # noqa: E402
 from manifold3d import Manifold         # noqa: E402
 from p3dkernel import Scene             # noqa: E402
+
+# This is a live-reload tool: scripts and their helpers are re-read on every
+# render, sometimes faster than a filesystem mtime can distinguish (CPython's
+# .pyc staleness check truncates to whole seconds), and a stale .pyc left in the
+# user's folder by an earlier run would silently serve an edited-away helper.
+# So: never write bytecode, and point bytecode *reads* at a private empty tree
+# so an existing __pycache__ next to the scripts is never consulted. This is
+# set after the heavy imports above so numpy/trimesh still load from their own
+# cached bytecode.
+sys.dont_write_bytecode = True
+sys.pycache_prefix = os.path.join(tempfile.gettempdir(), "p3dpreview-nocache")
+
+# sys.path as it stands before any script folder is added. Modules that live
+# under one of these entries (the tool itself, its shim, the stdlib,
+# site-packages) are never purged, whatever root the user points the tool at.
+_PROTECTED_DIRS = tuple({os.path.abspath(p) for p in sys.path if p} | {_HERE, _SHIM})
+
+# Renders share sys.modules and sys.path while loading a script and its
+# helpers, so they are serialised. A render is ~0.1 s; the viewer never has
+# more than one useful request in flight anyway.
+_render_lock = threading.Lock()
 
 # Steel-ish palette; index 0 is the "main" body, extras get distinct shades so
 # separate solids (guide plates, linestop bars, ...) are visually separable.
@@ -42,17 +66,56 @@ class RenderError(Exception):
     pass
 
 
+def _is_under(path, directory):
+    try:
+        return os.path.commonpath([path, directory]) == directory
+    except ValueError:  # different drives on Windows
+        return False
+
+
+def _purge_modules_from(directory):
+    """Drop cached modules whose source lives anywhere under `directory`
+    (helper modules and helper packages), so that a helper edited between
+    renders is re-imported. Anything importable from the interpreter's own
+    search path is left alone, so pointing the root at a folder that happens
+    to contain the tool or site-packages can never unload those."""
+    for name, mod in list(sys.modules.items()):
+        f = getattr(mod, "__file__", None)
+        if not f:
+            continue
+        f = os.path.abspath(f)
+        if any(_is_under(f, p) for p in _PROTECTED_DIRS):
+            continue
+        if _is_under(f, directory):
+            sys.modules.pop(name, None)
+
+
 def _load_entry(path):
     """Import the script module and return (module, entry_function)."""
     path = os.path.abspath(path)
+    script_dir = os.path.dirname(path)
     stem = os.path.splitext(os.path.basename(path))[0]
     modname = "p3d_script_" + stem
     spec = importlib.util.spec_from_file_location(modname, path)
     if spec is None or spec.loader is None:
         raise RenderError("cannot load %s" % path)
     mod = importlib.util.module_from_spec(spec)
+    _purge_modules_from(script_dir)
     sys.modules[modname] = mod
-    spec.loader.exec_module(mod)
+    # Let the script import helpers that sit next to it, like Plant does when
+    # the folder is on its script path.
+    sys.path.insert(0, script_dir)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        import traceback
+        raise RenderError("script failed to import: %s: %s\n%s" % (
+            type(e).__name__, e, traceback.format_exc()))
+    finally:
+        try:
+            sys.path.remove(script_dir)
+        except ValueError:
+            pass
 
     # Prefer a function whose name matches the filename (Plant's rule).
     fn = getattr(mod, stem, None)
@@ -74,6 +137,7 @@ def describe_params(fn):
     ordered list the UI can render."""
     meta = getattr(fn, "_p3d_meta", {}) or {}
     pmeta = meta.get("params", {})
+    enums = meta.get("enums", {})
     sig = inspect.signature(fn)
     out = []
     for i, (name, sp) in enumerate(sig.parameters.items()):
@@ -83,6 +147,9 @@ def describe_params(fn):
             continue
         default = sp.default if sp.default is not inspect.Parameter.empty else 0.0
         info = pmeta.get(name, {})
+        options = enums.get(name)
+        if isinstance(options, dict):
+            options = list(options.keys())
         out.append({
             "name": name,
             "default": default,
@@ -91,6 +158,7 @@ def describe_params(fn):
             "long": info.get("long", ""),
             "allow_negative": info.get("allow_negative", False),
             "allow_zero": info.get("allow_zero", True),
+            "enum": [str(o) for o in options] if options else None,
         })
     return out
 
@@ -105,11 +173,19 @@ def _mesh_to_trimesh(m, color):
     return tm
 
 
-def render_script(path, params=None):
+def render_script(path, params=None, segments=None):
     """Run the script and return a dict with keys:
         glb   : bytes (GLB) or None if empty
         meta  : dict (params schema, values used, ports, dims, warnings, bounds)
-    Raises RenderError on load/exec failure (message is user-facing)."""
+    `segments` overrides the facet count for round primitives (default from
+    P3D_SEGMENTS env, else 96).
+    Raises RenderError on load/exec failure (message is user-facing).
+    Thread-safe: concurrent callers are serialised (see _render_lock)."""
+    with _render_lock:
+        return _render_script_unlocked(path, params, segments)
+
+
+def _render_script_unlocked(path, params=None, segments=None):
     mod, fn = _load_entry(path)
     schema = describe_params(fn)
     values = {p["name"]: p["default"] for p in schema}
@@ -118,7 +194,8 @@ def render_script(path, params=None):
             if k in values:
                 values[k] = v
 
-    s = Scene()
+    s = Scene(segments=segments)
+    t0 = time.perf_counter()
     try:
         fn(s, **values)
     except Exception as e:
@@ -147,6 +224,8 @@ def render_script(path, params=None):
         b = scene.bounds
         bounds = {"min": b[0].tolist(), "max": b[1].tolist()}
 
+    elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+
     meta = {
         "script": os.path.basename(path),
         "entry": fn.__name__,
@@ -155,9 +234,12 @@ def render_script(path, params=None):
         "values": values,
         "ports": s.points,
         "dims": s.dims,
+        "primitive_dims": s.primitive_dims(),
         "warnings": s.warnings,
         "solid_count": len(live),
         "bounds": bounds,
+        "segments": s.segments,
+        "elapsed_ms": elapsed_ms,
     }
     return {"glb": glb, "meta": meta}
 
@@ -192,9 +274,10 @@ def main(argv):
         with open(out, "wb") as f:
             f.write(result["glb"])
         print("wrote", out, "(%d bytes)" % len(result["glb"]))
-    with open(base + ".json", "w") as f:
+    meta_path = base + ".meta.json"
+    with open(meta_path, "w") as f:
         json.dump(result["meta"], f, indent=2)
-    print("wrote", base + ".json")
+    print("wrote", meta_path)
     for w in result["meta"]["warnings"]:
         print("  warn:", w)
 

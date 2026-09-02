@@ -6,13 +6,13 @@ save: the model re-renders automatically. Drag the parameter sliders to explore
 a fitting's design space without touching Plant 3D at all.
 
     python server.py                 # serve ./.. (repo root), open :8770
-    python server.py --root DIR --port N --no-open
+    python server.py --root DIR --port N --no-open --allow-remote-root
 
 Endpoints:
     GET /                     viewer HTML
     GET /vendor/*, /viewer/*  static assets
     GET /api/scripts          JSON {root, scripts}
-    GET /api/render?script=REL&params=JSON   -> {meta, glb_b64}
+    GET /api/render?script=REL&params=JSON&segments=N   -> {meta, glb_b64}
     GET /api/browse?path=DIR  JSON {path, parent, entries: [{name, path, has_scripts}]}
     POST /api/root {"path": DIR}   switch the watched root -> {root, scripts}
     GET /api/events           text/event-stream; fires when any script changes
@@ -39,7 +39,11 @@ ROOT = os.path.abspath(os.path.join(_HERE, ".."))     # repo root by default
 _SKIP_DIRS = {"__pycache__", ".venv", ".git"}
 _watch_version = 0
 _watch_lock = threading.Lock()
+_watch_cond = threading.Condition(_watch_lock)   # notifies SSE streams instantly
 _last_changed = ""
+ALLOW_ROOT_CHANGE = True   # main() turns this off for non-loopback binds
+_MAX_BODY = 1_000_000      # bytes; the only POST body is a short JSON object
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 
 def _script_subdirs(root):
@@ -57,48 +61,56 @@ def _script_subdirs(root):
     ]
 
 
+def _list_py(path):
+    """Names of .py files directly inside `path`; [] if it cannot be read."""
+    try:
+        return sorted(n for n in os.listdir(path) if n.endswith(".py"))
+    except OSError:
+        return []
+
+
 def discover_scripts(root=None):
     root = root if root is not None else ROOT
-    found = []
-    try:
-        for name in sorted(os.listdir(root)):
-            if name.endswith(".py"):
-                found.append(name)
-    except OSError:
-        pass
+    found = list(_list_py(root))
     for d in _script_subdirs(root):
-        full = os.path.join(root, d)
-        for name in sorted(os.listdir(full)):
-            if name.endswith(".py"):
-                found.append(d + "/" + name)
+        found.extend(d + "/" + name for name in _list_py(os.path.join(root, d)))
     return found
 
 
-def _script_mtimes():
-    """Return the current script paths and mtimes used by the live watcher."""
+def _snapshot():
+    """(root, {abs_path: mtime}) for every script under the current root. The
+    root is captured alongside so a root switch mid-poll cannot mix paths from
+    two trees."""
+    root = ROOT
     mtimes = {}
-    for rel in discover_scripts():
-        path = os.path.join(ROOT, rel)
+    for rel in discover_scripts(root):
+        path = os.path.join(root, rel)
         try:
             mtimes[path] = os.path.getmtime(path)
         except OSError:
             pass  # the file may have disappeared between listing and stat
-    return mtimes
+    return root, mtimes
 
 
-def _watch_change(previous, current):
+def _script_mtimes():
+    """Kept for callers/tests that only want the mtime map."""
+    return _snapshot()[1]
+
+
+def _watch_change(previous, current, root=None):
     """Describe a snapshot change for the browser's live-reload handler."""
+    root = root if root is not None else ROOT
     if previous.keys() != current.keys():
         return "__scripts__"
     for path in sorted(current):
         if previous[path] != current[path]:
-            return os.path.relpath(path, ROOT).replace(os.sep, "/")
+            return os.path.relpath(path, root).replace(os.sep, "/")
     return None
 
 
 def _dir_entries(path):
     """Subdirectories of `path`, flagged with whether they'd work as a root
-    (i.e. contain customfittings/ or customsupports/ themselves)."""
+    (i.e. contain .py files directly or one level down)."""
     entries = []
     try:
         names = sorted(os.listdir(path))
@@ -127,24 +139,101 @@ def _safe_script_path(rel):
     return full
 
 
-def watcher():
-    """Poll scripts; notify clients about edits, additions, and deletions."""
-    global _watch_version, _last_changed
-    mtimes = _script_mtimes()
-    while True:
-        current = _script_mtimes()
-        changed = _watch_change(mtimes, current)
-        mtimes = current
+def _static_path(url_path):
+    """Map /vendor/... or /viewer/... to a file under that folder, or None if
+    the normalised path escapes it."""
+    parts = [p for p in url_path.split("/") if p]
+    if not parts:
+        return None
+    base = os.path.join(_HERE, parts[0])
+    full = os.path.normpath(os.path.join(_HERE, *parts))
+    try:
+        if os.path.commonpath([base, full]) != base:
+            return None
+    except ValueError:  # different drives on Windows
+        return None
+    return full
+
+
+def _root_changes_allowed(host, allow_remote_root):
+    """Browsing the filesystem and switching root are only safe from the local
+    machine. On a LAN bind they are off unless explicitly re-enabled."""
+    return host in _LOOPBACK_HOSTS or bool(allow_remote_root)
+
+
+def _browser_url(host, port):
+    open_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    if ":" in open_host:            # bare IPv6 literal needs brackets in a URL
+        open_host = "[%s]" % open_host
+    return "http://%s:%d/" % (open_host, port)
+
+
+def _parse_segments(q):
+    """Facet count from the query string, clamped to [8, 256]; None if absent
+    or not an integer."""
+    raw = (q.get("segments") or [""])[0]
+    try:
+        return max(8, min(256, int(raw)))
+    except ValueError:
+        return None
+
+
+def _watch_poll(mtimes):
+    """One watcher iteration. Returns the new mtime map. Never raises: a bad
+    poll (permission error, unplugged drive) must not kill live reload."""
+    try:
+        root, current = _snapshot()
+        changed = _watch_change(mtimes, current, root)
         if changed:
-            with _watch_lock:
-                _watch_version += 1
-                _last_changed = changed
-        time.sleep(0.3)
+            _notify(changed)
+        return current
+    except Exception as e:
+        print("[watcher] %s: %s" % (type(e).__name__, e), file=sys.stderr)
+        return mtimes
+
+
+def _notify(changed):
+    global _watch_version, _last_changed
+    with _watch_cond:
+        _watch_version += 1
+        _last_changed = changed
+        _watch_cond.notify_all()
+
+
+def _set_root(path):
+    """Switch the watched root. Taken under the watch lock so a poll never
+    sees a half-switched state, then broadcast to clients."""
+    global ROOT
+    with _watch_cond:
+        ROOT = path
+    _notify("__root__")
+
+
+_watch_stop = threading.Event()   # set to end the watcher thread (tests do this)
+
+
+def watcher(stop=None):
+    """Poll scripts; notify clients about edits, additions, and deletions.
+    Runs until `stop` (a threading.Event, default the module-level one) is set."""
+    stop = stop if stop is not None else _watch_stop
+    mtimes = _snapshot()[1]
+    while not stop.is_set():
+        mtimes = _watch_poll(mtimes)
+        stop.wait(0.3)
 
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass  # quiet
+
+    def handle(self):
+        # A browser dropping a keep-alive connection (tab refresh, SSE close)
+        # raises here while the stdlib waits for the next request line. That
+        # is routine, not an error, so don't let socketserver print a traceback.
+        try:
+            super().handle()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
 
     # -- helpers -------------------------------------------------------------
     def _send(self, code, body, ctype="application/json"):
@@ -175,9 +264,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/" or path == "/index.html":
             self._send_file(os.path.join(_HERE, "viewer", "index.html"), "text/html; charset=utf-8")
         elif path.startswith("/vendor/") or path.startswith("/viewer/"):
-            rel = path.lstrip("/")
-            full = os.path.abspath(os.path.join(_HERE, rel))
-            if not full.startswith(_HERE):
+            full = _static_path(path)
+            if full is None:
                 self._send(403, "forbidden", "text/plain"); return
             ctype = "application/javascript" if full.endswith(".js") else "text/plain"
             self._send_file(full, ctype)
@@ -200,11 +288,22 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "not found", "text/plain")
 
     def _read_json_body(self):
+        """Parse the JSON body. Raises ValueError (which JSONDecodeError
+        subclasses) when the body is not a JSON object."""
         length = int(self.headers.get("Content-Length") or 0)
+        if length < 0 or length > _MAX_BODY:
+            raise ValueError("Content-Length must be between 0 and %d" % _MAX_BODY)
         raw = self.rfile.read(length) if length else b""
-        return json.loads(raw or b"{}")
+        payload = json.loads(raw or b"{}")
+        if not isinstance(payload, dict):
+            raise ValueError("JSON body must be an object")
+        return payload
 
     def _handle_browse(self, q):
+        if not ALLOW_ROOT_CHANGE:
+            self._send(403, json.dumps({
+                "error": "browsing and root changes are disabled on a non-loopback bind; "
+                         "start with --allow-remote-root to enable"})); return
         path = (q.get("path") or [""])[0] or ROOT
         path = os.path.abspath(path)
         if not os.path.isdir(path):
@@ -219,19 +318,18 @@ class Handler(BaseHTTPRequestHandler):
         }))
 
     def _handle_set_root(self):
-        global ROOT
+        if not ALLOW_ROOT_CHANGE:
+            self._send(403, json.dumps({
+                "error": "browsing and root changes are disabled on a non-loopback bind; "
+                         "start with --allow-remote-root to enable"})); return
         try:
             payload = self._read_json_body()
-        except json.JSONDecodeError:
-            self._send(400, json.dumps({"error": "invalid JSON body"})); return
+        except ValueError as e:
+            self._send(400, json.dumps({"error": "invalid JSON body: %s" % e})); return
         path = os.path.abspath(str(payload.get("path", "")))
         if not os.path.isdir(path):
             self._send(400, json.dumps({"error": "not a directory: %s" % path})); return
-        ROOT = path
-        with _watch_lock:
-            global _watch_version, _last_changed
-            _watch_version += 1
-            _last_changed = "__root__"
+        _set_root(path)
         self._send(200, json.dumps({"root": ROOT, "scripts": discover_scripts()}))
 
     def _handle_render(self, q):
@@ -239,15 +337,17 @@ class Handler(BaseHTTPRequestHandler):
         params = {}
         if q.get("params"):
             try:
-                params = json.loads(q["params"][0])
+                parsed = json.loads(q["params"][0])
             except json.JSONDecodeError:
-                pass
+                parsed = None
+            if isinstance(parsed, dict):
+                params = parsed
         try:
             full = _safe_script_path(rel)
         except ValueError as e:
             self._send(400, json.dumps({"error": str(e)})); return
         try:
-            result = R.render_script(full, params)
+            result = R.render_script(full, params, segments=_parse_segments(q))
         except R.RenderError as e:
             self._send(200, json.dumps({"error": str(e), "script": rel})); return
         except Exception as e:  # last-resort guard so the server never dies
@@ -265,38 +365,52 @@ class Handler(BaseHTTPRequestHandler):
         last = -1
         try:
             while True:
-                with _watch_lock:
+                with _watch_cond:
+                    if _watch_version == last:
+                        # Woken by _notify, or every 15 s for a heartbeat so
+                        # proxies / the client keep the stream open.
+                        _watch_cond.wait(timeout=15.0)
                     v, ch = _watch_version, _last_changed
                 if v != last:
                     last = v
                     payload = json.dumps({"version": v, "changed": ch})
                     self.wfile.write(("data: %s\n\n" % payload).encode())
-                    self.wfile.flush()
                 else:
-                    # heartbeat so proxies / the client keep the stream open
                     self.wfile.write(b": ping\n\n")
-                    self.wfile.flush()
-                time.sleep(1.0)
-        except (BrokenPipeError, ConnectionResetError):
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
 
 def main(argv):
-    global ROOT
+    global ROOT, ALLOW_ROOT_CHANGE
     import argparse
     ap = argparse.ArgumentParser(description="Plant 3D live preview server.")
-    ap.add_argument("--root", default=ROOT, help="repo root containing custom* dirs")
+    ap.add_argument("--root", default=ROOT, help="folder containing your Plant 3D custom scripts")
     ap.add_argument("--port", type=int, default=8770)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--no-open", action="store_true", help="don't open a browser")
+    ap.add_argument("--allow-remote-root", action="store_true",
+                    help="allow folder browsing / root switching when bound to a non-loopback host")
     args = ap.parse_args(argv)
     ROOT = os.path.abspath(args.root)
+    ALLOW_ROOT_CHANGE = _root_changes_allowed(args.host, args.allow_remote_root)
+
+    try:
+        httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    except OSError as e:
+        print("Cannot listen on %s:%d (%s). Is another preview server running? "
+              "Try --port with a different number." % (args.host, args.port, e.strerror or e),
+              file=sys.stderr)
+        return 1
 
     threading.Thread(target=watcher, daemon=True).start()
-    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
-    url = "http://%s:%d/" % (args.host, args.port)
+    url = _browser_url(args.host, args.port)
     print("Plant 3D preview server running at", url)
     print("Watching:", ROOT)
+    if not ALLOW_ROOT_CHANGE:
+        print("Folder browsing / root switching disabled (non-loopback bind). "
+              "Use --allow-remote-root to enable.")
     print("Ctrl-C to stop.")
     if not args.no_open:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
@@ -304,7 +418,10 @@ def main(argv):
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nbye")
+    finally:
+        httpd.server_close()
+    return 0
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,4 @@
+# Development / test only. Runtime deps live in requirements.txt.
+# After installing, fetch the browser once: python -m playwright install chromium
+-r requirements.txt
+playwright==1.62.0
