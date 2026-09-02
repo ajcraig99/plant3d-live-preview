@@ -57,48 +57,56 @@ def _script_subdirs(root):
     ]
 
 
+def _list_py(path):
+    """Names of .py files directly inside `path`; [] if it cannot be read."""
+    try:
+        return sorted(n for n in os.listdir(path) if n.endswith(".py"))
+    except OSError:
+        return []
+
+
 def discover_scripts(root=None):
     root = root if root is not None else ROOT
-    found = []
-    try:
-        for name in sorted(os.listdir(root)):
-            if name.endswith(".py"):
-                found.append(name)
-    except OSError:
-        pass
+    found = list(_list_py(root))
     for d in _script_subdirs(root):
-        full = os.path.join(root, d)
-        for name in sorted(os.listdir(full)):
-            if name.endswith(".py"):
-                found.append(d + "/" + name)
+        found.extend(d + "/" + name for name in _list_py(os.path.join(root, d)))
     return found
 
 
-def _script_mtimes():
-    """Return the current script paths and mtimes used by the live watcher."""
+def _snapshot():
+    """(root, {abs_path: mtime}) for every script under the current root. The
+    root is captured alongside so a root switch mid-poll cannot mix paths from
+    two trees."""
+    root = ROOT
     mtimes = {}
-    for rel in discover_scripts():
-        path = os.path.join(ROOT, rel)
+    for rel in discover_scripts(root):
+        path = os.path.join(root, rel)
         try:
             mtimes[path] = os.path.getmtime(path)
         except OSError:
             pass  # the file may have disappeared between listing and stat
-    return mtimes
+    return root, mtimes
 
 
-def _watch_change(previous, current):
+def _script_mtimes():
+    """Kept for callers/tests that only want the mtime map."""
+    return _snapshot()[1]
+
+
+def _watch_change(previous, current, root=None):
     """Describe a snapshot change for the browser's live-reload handler."""
+    root = root if root is not None else ROOT
     if previous.keys() != current.keys():
         return "__scripts__"
     for path in sorted(current):
         if previous[path] != current[path]:
-            return os.path.relpath(path, ROOT).replace(os.sep, "/")
+            return os.path.relpath(path, root).replace(os.sep, "/")
     return None
 
 
 def _dir_entries(path):
     """Subdirectories of `path`, flagged with whether they'd work as a root
-    (i.e. contain customfittings/ or customsupports/ themselves)."""
+    (i.e. contain .py files directly or one level down)."""
     entries = []
     try:
         names = sorted(os.listdir(path))
@@ -127,18 +135,32 @@ def _safe_script_path(rel):
     return full
 
 
+def _watch_poll(mtimes):
+    """One watcher iteration. Returns the new mtime map. Never raises: a bad
+    poll (permission error, unplugged drive) must not kill live reload."""
+    try:
+        root, current = _snapshot()
+        changed = _watch_change(mtimes, current, root)
+        if changed:
+            _notify(changed)
+        return current
+    except Exception as e:
+        print("[watcher] %s: %s" % (type(e).__name__, e), file=sys.stderr)
+        return mtimes
+
+
+def _notify(changed):
+    global _watch_version, _last_changed
+    with _watch_lock:
+        _watch_version += 1
+        _last_changed = changed
+
+
 def watcher():
     """Poll scripts; notify clients about edits, additions, and deletions."""
-    global _watch_version, _last_changed
-    mtimes = _script_mtimes()
+    mtimes = _snapshot()[1]
     while True:
-        current = _script_mtimes()
-        changed = _watch_change(mtimes, current)
-        mtimes = current
-        if changed:
-            with _watch_lock:
-                _watch_version += 1
-                _last_changed = changed
+        mtimes = _watch_poll(mtimes)
         time.sleep(0.3)
 
 
@@ -228,10 +250,7 @@ class Handler(BaseHTTPRequestHandler):
         if not os.path.isdir(path):
             self._send(400, json.dumps({"error": "not a directory: %s" % path})); return
         ROOT = path
-        with _watch_lock:
-            global _watch_version, _last_changed
-            _watch_version += 1
-            _last_changed = "__root__"
+        _notify("__root__")
         self._send(200, json.dumps({"root": ROOT, "scripts": discover_scripts()}))
 
     def _handle_render(self, q):
