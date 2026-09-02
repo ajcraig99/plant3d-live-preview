@@ -234,7 +234,7 @@ function draw() {
 function tick() {
   resize();
   const moved = controls.update();   // true while orbiting or damping
-  if (spin) { pivot.rotation.y += 0.005; needsDraw = true; }
+  if (spin) { pivot.rotation.y += 0.005; needsDraw = true; if (sectionOn) updateSectionPlane(); }
   if (moved || needsDraw) { needsDraw = false; draw(); }
   requestAnimationFrame(tick);
 }
@@ -370,17 +370,28 @@ const SECTION_AXES = [{ viewer: 0, label: 'X' }, { viewer: 1, label: 'Z' }, { vi
 let sectionOn = false, sectionAxisIdx = 1, sectionFrac = 0.5;
 const sectionPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
 
-function updateSection() {
-  const box = new THREE.Box3().setFromObject(modelGroup);
-  if (!box.isEmpty()) {
-    const axis = SECTION_AXES[sectionAxisIdx].viewer;
-    const lo = box.min.getComponent(axis), hi = box.max.getComponent(axis);
-    const pos = lo + (hi - lo) * sectionFrac;
-    const n = new THREE.Vector3(); n.setComponent(axis, -1);
-    // Plane: n·p + c = 0. three.js keeps the side where n·p + c >= 0,
-    // i.e. coordinate <= pos. The cut opens the interior towards the camera.
-    sectionPlane.set(n, pos);
+function updateSectionPlane() {
+  const axis = SECTION_AXES[sectionAxisIdx].viewer;
+  let lo, hi;
+  if (lastMeta && lastMeta.bounds) {
+    // Model-local bounds in viewer axes, independent of Spin.
+    lo = lastMeta.bounds.min[axis]; hi = lastMeta.bounds.max[axis];
+  } else {
+    pivot.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(modelGroup);
+    if (box.isEmpty()) return;
+    lo = box.min.getComponent(axis); hi = box.max.getComponent(axis);
   }
+  const n = new THREE.Vector3(); n.setComponent(axis, -1);
+  // Plane in model space: n·p + c = 0. three.js keeps the side where
+  // n·p + c >= 0, i.e. coordinate <= pos. Carried into world space by the
+  // pivot's transform so the cut stays attached to the model while it spins.
+  pivot.updateMatrixWorld(true);
+  sectionPlane.set(n, lo + (hi - lo) * sectionFrac).applyMatrix4(pivot.matrixWorld);
+}
+
+function updateSection() {
+  updateSectionPlane();
   const planes = sectionOn ? [sectionPlane] : [];
   modelGroup.traverse(o => {
     const mats = o.material ? [].concat(o.material) : [];
@@ -496,7 +507,8 @@ function readHash() {
   try {
     const h = new URLSearchParams(location.hash.slice(1));
     const values = h.get('p') ? JSON.parse(h.get('p')) : {};
-    return { script: h.get('script') || null, values: (values && typeof values === 'object') ? values : {} };
+    const isObj = values && typeof values === 'object' && !Array.isArray(values);
+    return { script: h.get('script') || null, values: isObj ? values : {} };
   } catch (_) { return { script: null, values: {} }; }
 }
 function writeHash() {
@@ -566,6 +578,7 @@ function applyMaterials() {
 }
 
 let renderSeq = 0;         // increments per request; responses older than the latest are dropped
+let pendingRebuild = false, pendingFrame = false;   // see render()
 let segments = 96;
 
 function showBanner(text) {
@@ -645,6 +658,11 @@ async function render({ rebuildPanel = false, frame = false } = {}) {
   const script = currentScript;
   const seq = ++renderSeq;
   renderCount++;
+  // Flags accumulate across superseded requests: if a "load script" render
+  // (frame + rebuild) is overtaken by a slider render, the winner still frames
+  // and rebuilds. Consumed by whichever response lands with seq === renderSeq.
+  pendingRebuild = pendingRebuild || rebuildPanel;
+  pendingFrame = pendingFrame || frame;
   // Always send only explicit overrides so untouched params follow the file's
   // current defaults (important for live-reload after editing a default).
   const url = `/api/render?script=${encodeURIComponent(script)}&params=${encodeURIComponent(JSON.stringify(userValues))}&segments=${segments}`;
@@ -659,7 +677,8 @@ async function render({ rebuildPanel = false, frame = false } = {}) {
   if (seq !== renderSeq) return;   // a newer request superseded this one; drop the stale response
   if (data.error) {
     showBanner(`⚠ ${script}\n${data.error}`);
-    if (rebuildPanel) clearModelUi();
+    if (pendingRebuild) clearModelUi();
+    pendingRebuild = false; pendingFrame = false;
     return;
   }
   const meta = data.meta;
@@ -674,16 +693,18 @@ async function render({ rebuildPanel = false, frame = false } = {}) {
     if (seq !== renderSeq) return;
   }
   hideBanner();
+  const doFrame = pendingFrame, doRebuild = pendingRebuild;
+  pendingRebuild = false; pendingFrame = false;
   // Swap only now, so the previous model stays on screen until the new one is ready.
   clearGroup(modelGroup); pivot.rotation.y = 0;
   measurePts = []; clearGroup(measureGroup);
+  lastMeta = meta;   // before applyMaterials: the section plane reads meta.bounds
   if (gltf) { modelGroup.add(gltf.scene); applyMaterials(); }
-  lastMeta = meta;
   lastGlbB64 = data.glb_b64 || null; document.getElementById('btnExport').disabled = !lastGlbB64;
-  if (frame) frameModel(meta.bounds);
+  if (doFrame) frameModel(meta.bounds);
   drawOverlays(meta);
   showMeta(meta);
-  if (rebuildPanel) buildPanel(meta);
+  if (doRebuild) buildPanel(meta);
   return meta;
 }
 
@@ -789,12 +810,19 @@ async function loadScript(rel, initialValues = {}) {
   await render({ rebuildPanel: true, frame: true });
 }
 
-let listPromise = null;
-function loadList(opts) {
-  // Coalesce overlapping calls (page open + first SSE message, root switch + __root__ event).
-  if (listPromise) return listPromise;
-  listPromise = _loadList(opts || {}).finally(() => { listPromise = null; });
-  return listPromise;
+let listPromise = null, listPromiseKey = null;
+function loadList(opts = {}) {
+  // Coalesce identical overlapping calls (page open + first SSE message).
+  // Queue differing ones: a root switch must run its full load after any
+  // preferCurrent refresh the __root__ event has already started.
+  const key = JSON.stringify(opts);
+  if (listPromise && listPromiseKey === key) return listPromise;
+  const run = () => _loadList(opts);
+  const p = listPromise ? listPromise.then(run, run) : run();
+  listPromise = p; listPromiseKey = key;
+  const done = () => { if (listPromise === p) { listPromise = null; listPromiseKey = null; } };
+  p.then(done, done);
+  return p;
 }
 
 async function _loadList({ preferCurrent = false } = {}) {
@@ -966,6 +994,10 @@ document.getElementById('segSel').addEventListener('change', (e) => { segments =
 tb('btnSection', (e) => { sectionOn = toggle(e.target); updateSection(); });
 tb('btnSecAxis', () => { sectionAxisIdx = (sectionAxisIdx + 1) % SECTION_AXES.length; updateSection(); });
 document.getElementById('secPos').addEventListener('input', (e) => { sectionFrac = e.target.value / 100; updateSection(); });
-tb('btnMeasure', (e) => { measureOn = toggle(e.target); measurePts = []; drawMeasure(); canvas.style.cursor = measureOn ? 'crosshair' : ''; });
+tb('btnMeasure', (e) => {
+  measureOn = toggle(e.target); measurePts = []; drawMeasure();
+  if (lastMeta) showMeta(lastMeta);   // drop the Δ= readout from the HUD
+  canvas.style.cursor = measureOn ? 'crosshair' : '';
+});
 addEventListener('resize', resize);
 </script>
