@@ -134,6 +134,7 @@
         <button class="btn" id="btnSection" title="Cut the model with a plane">Section</button>
         <button class="btn" id="btnSecAxis" hidden title="Which Plant axis the cut plane is normal to">Axis Z</button>
         <input type="range" id="secPos" min="0" max="100" value="50" hidden title="Cut position">
+        <button class="btn" id="btnMeasure" title="Click two points on the model to measure">Measure</button>
       </div>
       <div id="banner"></div>
       <div id="warns"></div>
@@ -196,6 +197,7 @@ addUcsAxis(new THREE.Vector3(0, 0, 1), 0x5da7ff, 'Z');
 const pivot = new THREE.Group(); scene.add(pivot);
 const modelGroup = new THREE.Group(); pivot.add(modelGroup);   // GLB (already Y-up)
 const overlay = new THREE.Group(); pivot.add(overlay);          // ports + dims
+const measureGroup = new THREE.Group(); pivot.add(measureGroup);   // measure tool marks
 
 const loader = new GLTFLoader();
 const CREASE_ANGLE = THREE.MathUtils.degToRad(30);
@@ -390,6 +392,58 @@ function updateSection() {
   requestDraw();
 }
 
+// ---- measure tool -------------------------------------------------------------
+let measureOn = false, measurePts = [];
+const raycaster = new THREE.Raycaster();
+let pointerDownAt = null;
+
+function measureDistance() {
+  return measurePts.length === 2 ? measurePts[0].distanceTo(measurePts[1]) : 0;
+}
+
+function drawMeasure() {
+  clearGroup(measureGroup);
+  const color = 0xff7ad9;
+  measurePts.forEach(p => {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(modelRadius * 0.015, 12, 12),
+      new THREE.MeshBasicMaterial({ color, depthTest: false }));
+    m.position.copy(p); m.renderOrder = 998; measureGroup.add(m);
+  });
+  if (measurePts.length === 2) {
+    const g = new THREE.BufferGeometry().setFromPoints(measurePts);
+    const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.95 }));
+    line.renderOrder = 998; measureGroup.add(line);
+    const unit = (lastMeta && lastMeta.activate && lastMeta.activate.LengthUnit) || 'mm';
+    const lbl = makeLabel(`Δ=${measureDistance().toFixed(1)} ${unit}`, '#ffb3ec');
+    lbl.position.copy(measurePts[0].clone().add(measurePts[1]).multiplyScalar(0.5));
+    measureGroup.add(lbl);
+    if (lastMeta) showMeta(lastMeta);
+  }
+  requestDraw();
+}
+
+function pickOnModel(clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const meshes = []; modelGroup.traverse(o => { if (o.isMesh) meshes.push(o); });
+  const hit = raycaster.intersectObjects(meshes, false)[0];
+  return hit ? pivot.worldToLocal(hit.point.clone()) : null;   // store in pivot space so Spin carries it
+}
+
+canvas.addEventListener('pointerdown', (e) => { pointerDownAt = [e.clientX, e.clientY]; });
+canvas.addEventListener('pointerup', (e) => {
+  if (!measureOn || !pointerDownAt) return;
+  const moved = Math.hypot(e.clientX - pointerDownAt[0], e.clientY - pointerDownAt[1]);
+  pointerDownAt = null;
+  if (moved > 4) return;             // that was an orbit drag, not a click
+  const p = pickOnModel(e.clientX, e.clientY);
+  if (!p) return;
+  if (measurePts.length >= 2) measurePts = [];
+  measurePts.push(p);
+  drawMeasure();
+});
+
 function frameModel(bounds) {
   const box = new THREE.Box3();
   if (bounds) box.set(new THREE.Vector3(...bounds.min), new THREE.Vector3(...bounds.max));
@@ -434,6 +488,7 @@ window.__p3d = {
   overlayShareSpinPivot: () => pivot.children.includes(modelGroup) && pivot.children.includes(overlay),
   paramString, exportName,
   clipPlaneCount: () => { let n = 0; modelGroup.traverse(o => { if (o.isMesh) n += (o.material.clippingPlanes || []).length; }); return n; },
+  measureCount: () => measurePts.length, measureDistance,
 };
 
 // ---- URL hash state: #script=REL&p={"D":300} ---------------------------------
@@ -536,8 +591,9 @@ function parseGlb(b64) {
 function showMeta(meta) {
   const unit = (meta.activate && meta.activate.LengthUnit) || 'mm';
   const ms = typeof meta.elapsed_ms === 'number' ? `  ·  ${meta.elapsed_ms} ms` : '';
+  const meas = measurePts.length === 2 ? `  ·  Δ=${measureDistance().toFixed(1)} ${unit}` : '';
   document.getElementById('hud').textContent =
-    `${meta.entry}()  ·  ${meta.solid_count} solid(s)  ·  ${meta.ports.length} port(s)  ·  ${unit}${ms}`;
+    `${meta.entry}()  ·  ${meta.solid_count} solid(s)  ·  ${meta.ports.length} port(s)  ·  ${unit}${ms}${meas}`;
   const warns = document.getElementById('warns');
   if (meta.warnings && meta.warnings.length) {
     warns.style.display = 'block';
@@ -554,6 +610,7 @@ function clearModelUi() {
   document.getElementById('warns').style.display = 'none';
   document.getElementById('params').innerHTML = '<div class="empty">no render</div>';
   lastGlbB64 = null; document.getElementById('btnExport').disabled = true;
+  measurePts = []; clearGroup(measureGroup);
   requestDraw();
 }
 
@@ -619,6 +676,7 @@ async function render({ rebuildPanel = false, frame = false } = {}) {
   hideBanner();
   // Swap only now, so the previous model stays on screen until the new one is ready.
   clearGroup(modelGroup); pivot.rotation.y = 0;
+  measurePts = []; clearGroup(measureGroup);
   if (gltf) { modelGroup.add(gltf.scene); applyMaterials(); }
   lastMeta = meta;
   lastGlbB64 = data.glb_b64 || null; document.getElementById('btnExport').disabled = !lastGlbB64;
@@ -908,5 +966,6 @@ document.getElementById('segSel').addEventListener('change', (e) => { segments =
 tb('btnSection', (e) => { sectionOn = toggle(e.target); updateSection(); });
 tb('btnSecAxis', () => { sectionAxisIdx = (sectionAxisIdx + 1) % SECTION_AXES.length; updateSection(); });
 document.getElementById('secPos').addEventListener('input', (e) => { sectionFrac = e.target.value / 100; updateSection(); });
+tb('btnMeasure', (e) => { measureOn = toggle(e.target); measurePts = []; drawMeasure(); canvas.style.cursor = measureOn ? 'crosshair' : ''; });
 addEventListener('resize', resize);
 </script>

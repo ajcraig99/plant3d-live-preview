@@ -310,6 +310,19 @@ class ViewerE2E(unittest.TestCase):
         self.page.wait_for_timeout(200)
         self.assertEqual(self.hook("clipPlaneCount()"), 0)
 
+    def test_measure_two_clicks_reports_distance(self):
+        self.open()
+        self.page.click("#btnMeasure")
+        box = self.page.locator("#canvas").bounding_box()
+        cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        self.page.mouse.click(cx - 15, cy)
+        self.page.mouse.click(cx + 15, cy)
+        self.page.wait_for_function("window.__p3d.measureCount() === 2", timeout=5000)
+        self.assertGreater(self.hook("measureDistance()"), 0)
+        self.assertIn("Δ=", self.page.text_content("#hud"))
+        self.page.click("#btnMeasure")
+        self.assertEqual(self.hook("measureCount()"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
