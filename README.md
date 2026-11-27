@@ -97,5 +97,13 @@ End-to-end tests are skipped automatically when Playwright is not installed.
 
 ## Licence
 
-[TO CONFIRM] — the repository licence has not been chosen yet. Vendored
-third-party code is listed in `vendor/THIRD_PARTY.md`.
+Licensed under the [PolyForm Shield License 1.0.0](LICENSE)
+(<https://polyformproject.org/licenses/shield/1.0.0>).
+
+In plain terms: anyone, including companies on paid project work, can use,
+modify and share this tool for free. You may not use it to provide a product
+that competes with it, which includes repackaging or reselling it. The
+`LICENSE` file is the binding text; this summary is not.
+
+Vendored third-party code keeps its own licence and is listed in
+`vendor/THIRD_PARTY.md`.
